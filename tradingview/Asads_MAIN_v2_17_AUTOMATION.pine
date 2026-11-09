@@ -1,0 +1,3417 @@
+//@version=6
+//@strategy_alert_message {{strategy.order.alert_message}}
+strategy(
+     "Asads MAIN v2.17 • AUTOMATION",
+     overlay = true,
+     pyramiding = 0,
+     process_orders_on_close = true,
+     calc_on_every_tick = true,
+     calc_on_order_fills = false,
+     use_bar_magnifier = true,
+     initial_capital = 100000,
+     default_qty_type = strategy.percent_of_equity,
+     default_qty_value = 10,
+     commission_type = strategy.commission.percent,
+     commission_value = 0.0,
+     max_labels_count = 500,
+     max_lines_count = 500
+)
+
+groupSession = "1. Session"
+string sessionTZ = "America/New_York"
+tradeSession     = input.session("0930-1615", "Options Trading Window (ET)", group = groupSession)
+stopEvalSession  = input.session("1300-1500", "Adaptive Stop-Day Window (ET)", group = groupSession)
+hardStopSession  = input.session("1500-1615", "Hard Stop-Day Window (ET)", group = groupSession)
+openingRangeSess = input.session("0930-1000", "Opening Range (ET)", group = groupSession)
+executionMode   = input.string("Research - Bar Close", "Signal Execution Mode",
+     options = ["Research - Bar Close", "Live - Intrabar"], group = groupSession)
+tradeMonday     = input.bool(true, "Trade Monday", group = groupSession)
+tradeTuesday    = input.bool(true, "Trade Tuesday", group = groupSession)
+tradeWednesday  = input.bool(true, "Trade Wednesday", group = groupSession)
+tradeThursday   = input.bool(true, "Trade Thursday", group = groupSession)
+tradeFriday     = input.bool(true, "Trade Friday", group = groupSession)
+
+groupTrend = "2. Direction Context"
+emaFastLen      = input.int(9, "Fast EMA", minval = 2, group = groupTrend)
+emaMidLen       = input.int(21, "Mid EMA", minval = 3, group = groupTrend)
+emaSlowLen      = input.int(50, "Slow EMA", minval = 5, group = groupTrend)
+adxLen          = input.int(14, "ADX Length", minval = 5, group = groupTrend)
+adxSmooth       = input.int(14, "ADX Smoothing", minval = 5, group = groupTrend)
+minEntryADX     = input.float(13.0, "Minimum Entry ADX", minval = 5, step = 0.5, group = groupTrend)
+strongTrendADX  = input.float(23.0, "Strong Trend ADX", minval = 10, step = 0.5, group = groupTrend)
+structureLen    = input.int(12, "Breakout / Liquidity Lookback", minval = 5, group = groupTrend)
+
+groupRegime = "3. Chop / Movement Quality"
+effLen              = input.int(10, "Efficiency Lookback", minval = 4, group = groupRegime)
+minEntryEfficiency  = input.float(0.22, "Minimum Entry Efficiency", minval = 0.05, maxval = 0.80, step = 0.01, group = groupRegime)
+chopEfficiency      = input.float(0.18, "Chop Efficiency Threshold", minval = 0.03, maxval = 0.50, step = 0.01, group = groupRegime)
+chopCrossLookback   = input.int(12, "VWAP Cross Lookback", minval = 5, group = groupRegime)
+chopCrossThreshold  = input.float(3.0, "VWAP Crosses = Chop", minval = 1, step = 1, group = groupRegime)
+minATRRatio         = input.float(0.68, "Minimum ATR / ATR Average", minval = 0.30, step = 0.02, group = groupRegime)
+rvolLen             = input.int(20, "RVOL Length", minval = 5, group = groupRegime)
+
+groupCross = "4. Cross-Market Context"
+useCrossMarket = input.bool(true, "Use SPY / QQQ / IWM Confirmation", group = groupCross)
+spySymbol      = input.symbol("BATS:SPY", "SPY Symbol", group = groupCross)
+qqqSymbol      = input.symbol("BATS:QQQ", "QQQ Symbol", group = groupCross)
+iwmSymbol      = input.symbol("BATS:IWM", "IWM Symbol", group = groupCross)
+crossBars      = input.int(3, "Cross-Market Return Bars", minval = 1, maxval = 12, group = groupCross)
+crossMovePct   = input.float(0.03, "Meaningful Cross-Market Move %", minval = 0.0, step = 0.01, group = groupCross)
+
+groupPremium = "4B. Premium Footprint / Order Flow"
+fpMode = input.string("Use when available", "Footprint Mode",
+     options = ["Use when available", "Required", "Off"], group = groupPremium)
+fpTicks = input.int(10, "Ticks Per Footprint Row", minval = 1, maxval = 1000, group = groupPremium)
+fpVA = input.int(70, "Footprint Value Area %", minval = 1, maxval = 100, group = groupPremium)
+fpOpposingVeto = input.float(0.18, "Entry Veto If Opposing Delta Exceeds", minval = 0.05, maxval = 0.60, step = 0.01, group = groupPremium)
+fpStrongDelta = input.float(0.12, "Strong Directional Delta", minval = 0.03, maxval = 0.50, step = 0.01, group = groupPremium)
+
+groupEntry = "5. Entry Logic"
+cooldownBars          = input.int(2, "Bars Between Trades", minval = 0, maxval = 20, group = groupEntry)
+bodyATRMin            = input.float(0.22, "Displacement Body ATR", minval = 0.05, step = 0.01, group = groupEntry)
+pullbackToleranceATR  = input.float(0.12, "EMA Pullback Tolerance ATR", minval = 0.02, step = 0.01, group = groupEntry)
+allowVWAPReclaim      = input.bool(true, "Allow VWAP Reclaim Entries", group = groupEntry)
+allowLiquiditySweep   = input.bool(true, "Allow Liquidity Sweep Entries", group = groupEntry)
+allowOpeningBreakout  = input.bool(true, "Allow Opening Range Breakouts", group = groupEntry)
+
+allowPressureContinuation = input.bool(true, "Allow Early Pressure Continuation", group = groupEntry)
+pressureNearBreakATR       = input.float(0.18, "Pressure Entry Distance From Breakout ATR", minval = 0.05, maxval = 0.50, step = 0.01, group = groupEntry)
+
+requireTransitionForCounterSweep = input.bool(true, "Require Transition For Counter-Trend Sweep", group = groupEntry)
+
+sameDirResetMaxBars = input.int(4, "Maximum Same-Direction Re-entry Block Bars", minval = 1, maxval = 20, group = groupEntry)
+resetTouchATR       = input.float(0.10, "Reset Pullback Tolerance ATR", minval = 0.0, maxval = 0.50, step = 0.01, group = groupEntry)
+
+putRequireFullContext = input.bool(true, "PUTs Require Full 3/3 Context Unless Opening Breakout", group = groupEntry)
+putMinADX              = input.float(18.0, "PUT Minimum ADX", minval = 5.0, step = 0.5, group = groupEntry)
+putMinEfficiency       = input.float(0.27, "PUT Minimum Efficiency", minval = 0.05, maxval = 0.80, step = 0.01, group = groupEntry)
+
+disablePutEarlyContinuation = input.bool(true, "Disable PUT Early Continuation", group = groupEntry)
+putBreakoutMinADX          = input.float(21.0, "PUT Breakout Minimum ADX", minval = 5.0, step = 0.5, group = groupEntry)
+putBreakoutMinEfficiency   = input.float(0.31, "PUT Breakout Minimum Efficiency", minval = 0.05, maxval = 0.80, step = 0.01, group = groupEntry)
+putBreakoutNeedsExternalConfirm = input.bool(true, "PUT Breakout Needs Trend/Cross-Market Confirmation", group = groupEntry)
+putEMAPullbackNeedsStrongTrend = input.bool(true, "PUT EMA Pullback Requires Strong Bear Trend", group = groupEntry)
+blockNewPutsAfter1000 = input.bool(true, "Block New PUTs After 13:00 ET", group = groupEntry)
+
+disablePutEMAPullback = input.bool(true, "Disable PUT EMA Pullback", group = groupEntry)
+restrictPutBreakoutBefore0900 = input.bool(true, "Restrict Normal PUT Breakouts Before 12:00 ET", group = groupEntry)
+earlyPutBreakoutMinADX = input.float(27.0, "Exceptional Early PUT Breakout Min ADX", minval = 10.0, step = 0.5, group = groupEntry)
+earlyPutBreakoutMinEfficiency = input.float(0.42, "Exceptional Early PUT Breakout Min Efficiency", minval = 0.10, maxval = 0.90, step = 0.01, group = groupEntry)
+earlyPutBreakoutNeedCrossStrong = input.bool(true, "Exceptional Early PUT Needs Cross-Market Bear Confirmation", group = groupEntry)
+
+specialSetupMinADX        = input.float(18.0, "EMA/VWAP Minimum ADX", minval = 5.0, step = 0.5, group = groupEntry)
+specialSetupMinEfficiency = input.float(0.28, "EMA/VWAP Minimum Efficiency", minval = 0.05, maxval = 0.80, step = 0.01, group = groupEntry)
+
+lateSessionStrict = input.bool(true, "Use Strict Entry Rules After 13:00 ET", group = groupEntry)
+lateSessionMinADX = input.float(20.0, "After 13:00 ET Minimum ADX", minval = 5.0, step = 0.5, group = groupEntry)
+lateSessionMinEfficiency = input.float(0.30, "After 13:00 ET Minimum Efficiency", minval = 0.05, maxval = 0.80, step = 0.01, group = groupEntry)
+
+useOpeningChaseFilter = input.bool(true, "Use 09:30-10:30 ET Breakout Chase Filter", group = groupEntry)
+openingChaseExt9ATR   = input.float(2.05, "Opening Chase EMA9 Extension ATR", minval = 0.50, step = 0.05, group = groupEntry)
+openingChaseMove3ATR  = input.float(2.35, "Opening Chase 3-Bar Move ATR", minval = 0.50, step = 0.05, group = groupEntry)
+openingChaseBodyATR   = input.float(1.45, "Opening Chase Signal Body ATR", minval = 0.30, step = 0.05, group = groupEntry)
+openingChaseRangeATR  = input.float(1.85, "Opening Chase Signal Range ATR", minval = 0.50, step = 0.05, group = groupEntry)
+openingChaseVotes     = input.int(3, "Opening Chase Conditions Required", minval = 2, maxval = 4, group = groupEntry)
+
+useFirstHourBreakoutClimaxFilter = input.bool(true, "Use First-Hour Normal Breakout Climax Filter", group = groupEntry)
+climaxExt9ATR     = input.float(1.65, "Climax EMA9 Extension ATR", minval = 0.50, step = 0.05, group = groupEntry)
+climaxExt21ATR    = input.float(2.45, "Climax EMA21 Extension ATR", minval = 0.75, step = 0.05, group = groupEntry)
+climaxMove3ATR    = input.float(1.75, "Climax 3-Bar Move ATR", minval = 0.50, step = 0.05, group = groupEntry)
+climaxBodyATR     = input.float(0.95, "Climax Signal Body ATR", minval = 0.20, step = 0.05, group = groupEntry)
+climaxRVOL        = input.float(1.80, "Climax Minimum RVOL", minval = 0.50, step = 0.10, group = groupEntry)
+climaxATRRatio    = input.float(1.65, "Climax Minimum ATR Regime", minval = 0.50, step = 0.05, group = groupEntry)
+climaxVotes       = input.int(4, "Climax Conditions Required", minval = 3, maxval = 6, group = groupEntry)
+
+groupV23 = "5C. v2.3 Early Precision Specialization"
+useV23Precision = input.bool(true, "Use v2.3 QQQ Precision Entry Model", group = groupV23)
+v23NormalLeadMin = input.float(60.0, "Normal Breakout Minimum Lead", minval = 40.0, maxval = 90.0, step = 1.0, group = groupV23)
+v23NormalLeadMax = input.float(80.0, "Normal Breakout Maximum Lead", minval = 55.0, maxval = 100.0, step = 1.0, group = groupV23)
+v23EarlyLeadMin  = input.float(65.0, "Early Continuation Minimum Lead", minval = 40.0, maxval = 90.0, step = 1.0, group = groupV23)
+v23EarlyLeadMax  = input.float(92.0, "Early Continuation Maximum Lead", minval = 60.0, maxval = 100.0, step = 1.0, group = groupV23)
+v23MinEfficiency = input.float(0.27, "Normal Breakout Minimum Efficiency", minval = 0.05, maxval = 0.80, step = 0.01, group = groupV23)
+v23MaxEfficiency = input.float(0.55, "Normal Breakout Maximum Efficiency", minval = 0.15, maxval = 0.95, step = 0.01, group = groupV23)
+v23MaxRVOL       = input.float(1.30, "Normal Breakout Maximum RVOL", minval = 0.50, maxval = 4.0, step = 0.05, group = groupV23)
+v23MaxRangeATR   = input.float(1.20, "Normal Breakout Maximum Signal Range ATR", minval = 0.40, maxval = 3.0, step = 0.05, group = groupV23)
+v23MaxExt9ATR    = input.float(1.10, "Normal Breakout Maximum EMA9 Extension ATR", minval = 0.20, maxval = 3.0, step = 0.05, group = groupV23)
+v23AvoidATRTransition = input.bool(true, "Avoid ATR Ratio 0.80-1.00 Transition Zone", group = groupV23)
+v23BlockCall0700to0800 = input.bool(true, "Block CALL Entries 10:00-11:00 ET", group = groupV23)
+v23BlockCallAfter1000  = input.bool(true, "Block CALL Entries 13:00+ ET", group = groupV23)
+v23PutOpeningOnly0700to0800 = input.bool(true, "PUT Opening Breakout Only 10:00-11:00 ET", group = groupV23)
+v23PutBreakoutOnly0800to0900 = input.bool(true, "PUT Normal Breakout Only 11:00-12:00 ET", group = groupV23)
+
+groupV24 = "5AA. v2.6 Core Opportunity Engine"
+useV24Opportunity = input.bool(true, "Use v2.6 Core Opportunity Scoring", group = groupV24)
+v24LongScoreMin = input.float(66.0, "CALL Opportunity Score Minimum", minval = 45.0, maxval = 100.0, step = 1.0, group = groupV24)
+v24ShortScoreMin = input.float(68.0, "PUT Opportunity Score Minimum", minval = 45.0, maxval = 100.0, step = 1.0, group = groupV24)
+v24MaxEntriesPerDay = input.int(4, "Maximum Entries Per Day", minval = 1, maxval = 6, group = groupV24)
+v24EnableCloseMomentum = input.bool(false, "Enable 15:30-16:00 ET Close-Momentum Sleeve", group = groupV24)
+v24CloseOpenDriveATR = input.float(0.20, "Close Sleeve Minimum Opening-Drive ATR", minval = 0.05, maxval = 1.50, step = 0.05, group = groupV24)
+v24CloseLeadMin = input.float(60.0, "Close Sleeve Minimum Lead Score", minval = 40.0, maxval = 90.0, step = 1.0, group = groupV24)
+v24CloseMinEfficiency = input.float(0.20, "Close Sleeve Minimum Efficiency", minval = 0.05, maxval = 0.80, step = 0.01, group = groupV24)
+
+groupV29 = "5AF. v2.9 Core Quality Pruning"
+useV29CorePruning = input.bool(true, "Enable v2.9 Core Quality Pruning", group = groupV29)
+v29SkipATRDeadZone = input.bool(true, "Skip Weak ATR Dead Zone", group = groupV29)
+v29ATRDeadLow = input.float(0.80, "ATR Dead Zone Low", minval = 0.40, maxval = 1.20, step = 0.05, group = groupV29)
+v29ATRDeadHigh = input.float(1.00, "ATR Dead Zone High", minval = 0.60, maxval = 1.50, step = 0.05, group = groupV29)
+v29UseEfficiencyCap = input.bool(true, "Cap Over-Efficient / Mature Moves", group = groupV29)
+v29MaxEfficiency = input.float(0.55, "Maximum Entry Efficiency", minval = 0.25, maxval = 0.90, step = 0.01, group = groupV29)
+v29UseMinBody = input.bool(true, "Reject Tiny Signal Bodies", group = groupV29)
+v29MinBodyATR = input.float(0.22, "Minimum Signal Body ATR", minval = 0.05, maxval = 0.80, step = 0.01, group = groupV29)
+
+groupV210 = "5AG. v2.10 Context Rescue"
+useV210ATRRescue = input.bool(true, "Rescue Select ATR Dead-Zone Trades", group = groupV210)
+v210MinLead = input.float(70.0, "Rescue Minimum Development Score", minval = 55.0, maxval = 90.0, step = 1.0, group = groupV210)
+v210MinADX = input.float(18.0, "Rescue Minimum ADX", minval = 5.0, maxval = 50.0, step = 0.5, group = groupV210)
+v210RequireContext3 = input.bool(true, "Require Full 3/3 Context", group = groupV210)
+v210RequireDirectionDI = input.bool(true, "Require DI Direction Agreement", group = groupV210)
+v210RequireOneFlowConfirm = input.bool(true, "Require Cross-Market or Footprint Confirmation", group = groupV210)
+
+groupV29A = "5AH. Deep Attribution"
+v29AAttributionMode = input.string(
+     "SETUP",
+     "Deep Attribution Mode",
+     options = ["SETUP", "TIME", "DAY", "ATR", "EFFICIENCY", "CONTEXT"],
+     group = groupV29A,
+     tooltip = "Does NOT change trading logic. It only changes strategy entry IDs so TradingView Deep Backtest → Breakdown → By signals can show full-year performance by one dimension at a time."
+)
+
+groupLead = "5B. Hidden Move Development / Reversal Engine"
+useLeadGate = input.bool(true, "Use Hidden Leading-Score Entry Gate", group = groupLead)
+leadMinScore = input.float(60.0, "Minimum Direction Development Score", minval = 40.0, maxval = 90.0, step = 1.0, group = groupLead)
+leadMinEdge = input.float(8.0, "Minimum Score Edge vs Opposite Side", minval = 0.0, maxval = 30.0, step = 1.0, group = groupLead)
+reversalStretchATR = input.float(1.15, "Reversal-Risk Stretch From EMA21 ATR", minval = 0.50, maxval = 3.0, step = 0.05, group = groupLead)
+reversalWickFraction = input.float(0.40, "Reversal Rejection Wick Fraction", minval = 0.20, maxval = 0.80, step = 0.05, group = groupLead)
+exitThreatScore = input.float(66.0, "Opposite Development Exit Score", minval = 45.0, maxval = 95.0, step = 1.0, group = groupLead)
+exitThreatEdge = input.float(8.0, "Opposite Development Exit Edge", minval = 0.0, maxval = 30.0, step = 1.0, group = groupLead)
+reversalBankMinMFEATR = input.float(0.35, "Bank Profit After MFE ATR If Reversal Develops", minval = 0.05, maxval = 1.0, step = 0.05, group = groupLead)
+useTradeHealthExit = input.bool(true, "Use Hidden Trade-Health Profit Exit", group = groupLead)
+healthExitLevel = input.float(48.0, "Trade Health Exit Level", minval = 20.0, maxval = 80.0, step = 1.0, group = groupLead)
+
+groupTrade = "6. Trade Timing / Targets"
+baseStopATR          = input.float(0.50, "Base Stop ATR", minval = 0.20, step = 0.02, group = groupTrade)
+baseTargetATR        = input.float(0.70, "Base Target ATR", minval = 0.30, step = 0.05, group = groupTrade)
+strongTargetATR      = input.float(1.00, "Strong-Trend Target ATR", minval = 0.50, step = 0.05, group = groupTrade)
+specialSetupTargetATR = input.float(0.50, "CALL EMA/VWAP Capture Target ATR", minval = 0.30, step = 0.05, group = groupTrade)
+putSpecialSetupTargetATR = input.float(0.42, "PUT EMA/VWAP Capture Target ATR", minval = 0.25, step = 0.01, group = groupTrade)
+specialSetupExpectedMinutes = input.int(15, "EMA/VWAP Expected Minutes", minval = 5, maxval = 60, group = groupTrade)
+putSpecialExpectedMinutes = input.int(12, "PUT EMA/VWAP Expected Minutes", minval = 5, maxval = 45, group = groupTrade)
+allowTargetExtension = input.bool(false, "Allow Target Extension On Exceptional Runners", group = groupTrade)
+targetExtensionATR   = input.float(0.25, "Runner Target Extension ATR", minval = 0.10, step = 0.05, group = groupTrade)
+fastExpectedMinutes  = input.int(18, "Fast Setup Expected Minutes", minval = 3, maxval = 90, group = groupTrade)
+pullbackExpectedMins = input.int(28, "Pullback Expected Minutes", minval = 5, maxval = 120, group = groupTrade)
+maxTradeMinutes      = input.int(40, "Absolute Maximum Trade Minutes", minval = 5, maxval = 180, group = groupTrade)
+staleCheckMinutes    = input.int(9, "Start Checking For Stale Trade After Minutes", minval = 2, maxval = 60, group = groupTrade)
+staleProgressATR     = input.float(0.14, "Minimum MFE By Stale Check ATR", minval = 0.02, step = 0.01, group = groupTrade)
+directionHitATR      = input.float(0.30, "Directional Success = MFE ATR", minval = 0.10, step = 0.05, group = groupTrade)
+
+profitProtectTriggerATR = input.float(0.30, "Start Protecting Profit After MFE ATR", minval = 0.10, step = 0.05, group = groupTrade)
+profitLockStrongATR     = input.float(0.50, "Strong Profit Protection MFE ATR", minval = 0.20, step = 0.05, group = groupTrade)
+profitLockRunnerATR     = input.float(0.75, "Runner Protection MFE ATR", minval = 0.30, step = 0.05, group = groupTrade)
+lockFraction1           = input.float(0.20, "Lock Fraction At First Trigger", minval = 0.0, maxval = 0.80, step = 0.05, group = groupTrade)
+lockFraction2           = input.float(0.50, "Lock Fraction At Strong Trigger", minval = 0.05, maxval = 0.90, step = 0.05, group = groupTrade)
+lockFraction3           = input.float(0.70, "Lock Fraction At Runner Trigger", minval = 0.10, maxval = 0.95, step = 0.05, group = groupTrade)
+stallBarsAfterProfit    = input.int(1, "Bars Without New Extreme Before Stall Check", minval = 1, maxval = 6, group = groupTrade)
+stallExitMinMFEATR      = input.float(0.45, "Minimum MFE For Stall Exit ATR", minval = 0.15, step = 0.05, group = groupTrade)
+peakGivebackStartATR    = input.float(0.35, "Start Peak-Giveback Exit After MFE ATR", minval = 0.15, step = 0.05, group = groupTrade)
+peakGivebackMidATR      = input.float(0.55, "Mid Move MFE ATR", minval = 0.25, step = 0.05, group = groupTrade)
+peakGivebackRunnerATR   = input.float(0.80, "Runner MFE ATR", minval = 0.40, step = 0.05, group = groupTrade)
+maxGivebackEarlyPct     = input.float(0.55, "Max Peak Giveback Early", minval = 0.20, maxval = 0.90, step = 0.05, group = groupTrade)
+maxGivebackMidPct       = input.float(0.40, "Max Peak Giveback Mid Move", minval = 0.15, maxval = 0.80, step = 0.05, group = groupTrade)
+maxGivebackRunnerPct    = input.float(0.30, "Max Peak Giveback Runner", minval = 0.10, maxval = 0.70, step = 0.05, group = groupTrade)
+fastFailureMinutes      = input.int(6, "Fast Failure Window Minutes", minval = 2, maxval = 20, group = groupTrade)
+fastFailureMAEATR       = input.float(0.25, "Fast Failure Adverse Move ATR", minval = 0.10, step = 0.05, group = groupTrade)
+
+useLowLossStop          = input.bool(true, "Use Evidence-Based Low-Loss Stop", group = groupTrade)
+lowLossStopATR          = input.float(0.22, "Low-Loss Stop Distance ATR", minval = 0.08, maxval = 0.50, step = 0.02, group = groupTrade)
+lowLossMaxMFEATR        = input.float(0.28, "Low-Loss Only Before MFE ATR", minval = 0.10, maxval = 0.45, step = 0.02, group = groupTrade)
+
+impulseWindowMinutes    = input.int(10, "Impulse Mode Window Minutes", minval = 3, maxval = 30, group = groupTrade)
+impulseActivationATR    = input.float(0.42, "Fast Impulse Activation MFE ATR", minval = 0.20, step = 0.02, group = groupTrade)
+impulseGivebackPct      = input.float(0.32, "Fast Impulse Max Giveback", minval = 0.15, maxval = 0.80, step = 0.02, group = groupTrade)
+
+runnerActivationATR     = input.float(0.72, "Runner Activation MFE ATR", minval = 0.25, step = 0.02, group = groupTrade)
+runnerMinADX            = input.float(27.0, "Runner Minimum ADX", minval = 10.0, step = 0.5, group = groupTrade)
+runnerMinEfficiency     = input.float(0.38, "Runner Minimum Efficiency", minval = 0.10, maxval = 0.80, step = 0.01, group = groupTrade)
+runnerStructureBufferATR = input.float(0.12, "Runner Structure Trail Buffer ATR", minval = 0.02, maxval = 0.50, step = 0.01, group = groupTrade)
+runnerMaxGivebackPct    = input.float(0.42, "Runner Max Giveback Before Exhaustion", minval = 0.20, maxval = 0.80, step = 0.02, group = groupTrade)
+
+hardFloorStartMFEATR = input.float(0.30, "Hard Profit Floor Starts At MFE ATR", minval = 0.30, step = 0.05, group = groupTrade)
+hardFloorStartLockATR = input.float(0.06, "Profit Locked At First Floor ATR", minval = 0.02, step = 0.02, group = groupTrade)
+hardFloorStrongMFEATR = input.float(0.50, "Strong Profit Floor Starts At MFE ATR", minval = 0.40, step = 0.05, group = groupTrade)
+hardFloorStrongLockATR = input.float(0.18, "Profit Locked At Strong Floor ATR", minval = 0.05, step = 0.05, group = groupTrade)
+
+useProofTrail = input.bool(true, "Use Pre-Placed Proof Trail", group = groupTrade)
+proofTrailActivateATR = input.float(0.30, "Proof Trail Activation MFE ATR", minval = 0.15, maxval = 1.00, step = 0.05, group = groupTrade)
+proofTrailOffsetATR = input.float(0.24, "Proof Trail Offset ATR", minval = 0.08, maxval = 0.80, step = 0.02, group = groupTrade)
+
+useSelectiveRunner = input.bool(true, "Use Selective High-Conviction Runner", group = groupTrade)
+selectiveRunnerTargetATR = input.float(1.20, "Selective Runner Target ATR", minval = 0.80, maxval = 2.00, step = 0.05, group = groupTrade)
+selectiveRunnerTrailActivateATR = input.float(0.40, "Selective Runner Trail Activation ATR", minval = 0.25, maxval = 1.00, step = 0.05, group = groupTrade)
+selectiveRunnerTrailOffsetATR = input.float(0.30, "Selective Runner Trail Offset ATR", minval = 0.12, maxval = 0.80, step = 0.02, group = groupTrade)
+selectiveRunnerMinATRRatio = input.float(1.20, "Selective Runner Min ATR Regime", minval = 0.80, maxval = 2.00, step = 0.05, group = groupTrade)
+selectiveRunnerMinADX = input.float(23.0, "Selective Runner Min ADX", minval = 10.0, maxval = 50.0, step = 0.5, group = groupTrade)
+selectiveRunnerMinLead = input.float(70.0, "Selective Runner Min Development", minval = 50.0, maxval = 90.0, step = 1.0, group = groupTrade)
+
+useFailureCut = input.bool(false, "Use Selective Failure Cut (diagnostic; no effect in v2.12)", group = groupTrade)
+failureCutGraceMinutes = input.int(5, "Failure Cut Grace Minutes", minval = 0, maxval = 20, group = groupTrade)
+failureCutMaxMinutes = input.int(20, "Failure Cut Max Age Minutes", minval = 5, maxval = 45, group = groupTrade)
+failureCutMinAdverseATR = input.float(0.18, "Failure Cut Minimum Adverse Close ATR", minval = 0.08, maxval = 0.50, step = 0.01, group = groupTrade)
+failureCutMaxMFEATR = input.float(0.22, "Failure Cut Max MFE ATR", minval = 0.05, maxval = 0.50, step = 0.01, group = groupTrade)
+failureCutMinVotes = input.int(4, "Failure Cut Evidence Votes", minval = 3, maxval = 7, group = groupTrade)
+failureCutLeadEdge = input.float(8.0, "Failure Cut Opposing Lead Edge", minval = 0.0, maxval = 25.0, step = 1.0, group = groupTrade)
+
+groupV215 = "6C. v2.15 Robust History Veto"
+v215BlockFridayShortBreakout = input.bool(true, "Block Friday PUT Breakouts", group = groupV215)
+v215BlockWednesdayOR1112 = input.bool(true, "Block Wednesday Opening Breakouts 11:00-12:00 ET", group = groupV215)
+
+groupV217 = "6D. v2.17 Regime Router"
+v217UseRouter = input.bool(true, "Enable Regime Router", group = groupV217)
+v217BlockLowVolLongFlow = input.bool(true, "Block Low-Vol Long Partial-Flow Trap", group = groupV217)
+v217BlockLowVolFlatGapBreakout = input.bool(true, "Block Low-Vol Flat-Gap Breakout", group = groupV217)
+v217BlockRangeHighVolAdverseGap = input.bool(true, "Block Range + High-Vol Adverse-Gap Trap", group = groupV217)
+v217BlockAlignedLowVolAdverseGapBreakout = input.bool(true, "Block Aligned Low-Vol Adverse-Gap Breakout", group = groupV217)
+
+groupDay = "7. Stop Trading For Today"
+exhaustPersistMinutes = input.int(10, "Exhaustion Persistence Minutes", minval = 2, maxval = 45, group = groupDay)
+exhaustNeeded         = input.int(4, "Exhaustion Conditions Required", minval = 2, maxval = 7, group = groupDay)
+dayRangeATRConsumed   = input.float(0.85, "Daily ATR Consumed", minval = 0.40, maxval = 1.50, step = 0.05, group = groupDay)
+lateTrendEfficiency   = input.float(0.32, "Late Trend Exception Efficiency", minval = 0.10, maxval = 0.80, step = 0.01, group = groupDay)
+
+groupDisplay = "8. Display"
+showEMAs      = input.bool(false, "Show EMAs", group = groupDisplay)
+showVWAP      = input.bool(false, "Show VWAP", group = groupDisplay)
+showOR        = input.bool(false, "Show Opening Range", group = groupDisplay)
+showPD        = input.bool(false, "Show Prior Day High / Low", group = groupDisplay)
+showTradeLines = input.bool(true, "Show Entry / Target / Active SL / Hard SL Lines", group = groupDisplay)
+showTable     = input.bool(true, "Show Full Diagnostics Grid", group = groupDisplay)
+showLabels    = input.bool(true, "Show Entry / Exit / Stop-Day Labels", group = groupDisplay)
+
+groupDiagnostics = "9. Deep Diagnostics"
+var int diagColOffset = 0
+var int diagRowOffset = 0
+
+f_safeDiv(float num, float den, float fallback) =>
+    math.abs(den) > 0.0000001 ? num / den : fallback
+
+f_contextCount(bool a, bool b, bool c) =>
+    (a ? 1 : 0) + (b ? 1 : 0) + (c ? 1 : 0)
+
+f_diagPF(float gp, float gl) =>
+    gl > 0 ? gp / gl : gp > 0 ? 99.0 : na
+
+f_diagLine(int trades, int wins, float gp, float gl) =>
+    float wr = trades > 0 ? wins * 100.0 / trades : na
+    float pf = f_diagPF(gp, gl)
+    trades > 0 ? str.tostring(trades) + "T | " + str.tostring(wr, "#.0") + "% | PF " + (na(pf) ? "-" : str.tostring(pf, "#.##")) : "-"
+
+f_diagColor(int trades, int wins, float gp, float gl) =>
+    float wr = trades > 0 ? wins * 100.0 / trades : na
+    float pf = f_diagPF(gp, gl)
+    trades == 0 ? color.gray : not na(pf) and pf >= 1.25 and wr >= 55 ? color.lime : not na(pf) and pf < 1.0 ? color.orange : color.white
+
+f_diagAdd(array<int> t, array<int> w, array<float> gp, array<float> gl, int idx, bool won, float cashWin, float cashLoss) =>
+    if idx >= 0 and idx < array.size(t)
+        array.set(t, idx, array.get(t, idx) + 1)
+        array.set(w, idx, array.get(w, idx) + (won ? 1 : 0))
+        array.set(gp, idx, array.get(gp, idx) + cashWin)
+        array.set(gl, idx, array.get(gl, idx) + cashLoss)
+
+f_diagArrLine(array<int> t, array<int> w, array<float> gp, array<float> gl, int idx) =>
+    idx >= 0 and idx < array.size(t) ? f_diagLine(array.get(t, idx), array.get(w, idx), array.get(gp, idx), array.get(gl, idx)) : "-"
+
+f_diagArrColor(array<int> t, array<int> w, array<float> gp, array<float> gl, int idx) =>
+    idx >= 0 and idx < array.size(t) ? f_diagColor(array.get(t, idx), array.get(w, idx), array.get(gp, idx), array.get(gl, idx)) : color.gray
+
+f_setupIndex(string setupName) =>
+    setupName == "OPENING BREAKOUT" ? 0 :
+     setupName == "BREAKOUT" ? 1 :
+     setupName == "LIQUIDITY REVERSAL" ? 2 :
+     setupName == "EMA PULLBACK" ? 3 :
+     setupName == "VWAP RECLAIM" ? 4 :
+     setupName == "EARLY CONTINUATION" ? 5 : -1
+
+f_pair(table t, int c, int r, string label, string value, color valueColor) =>
+    int cc = c + diagColOffset
+    int rr = r + diagRowOffset
+    table.cell(t, cc, rr, label, text_color = color.white, text_size = size.tiny)
+    table.cell(t, cc + 1, rr, value, text_color = valueColor, text_size = size.tiny)
+
+f_header(table t, int c, string title, string subtitle) =>
+    int cc = c + diagColOffset
+    int rr = diagRowOffset
+    table.cell(t, cc, rr, title, text_color = color.aqua, bgcolor = color.new(color.gray, 75), text_size = size.tiny)
+    table.cell(t, cc + 1, rr, subtitle, text_color = color.white, bgcolor = color.new(color.gray, 75), text_size = size.tiny)
+
+inTradeSession = not na(time(timeframe.period, tradeSession, sessionTZ))
+inStopEval     = not na(time(timeframe.period, stopEvalSession, sessionTZ))
+inHardStop     = not na(time(timeframe.period, hardStopSession, sessionTZ))
+inOpeningRange = not na(time(timeframe.period, openingRangeSess, sessionTZ))
+
+bool isQQQChart = syminfo.ticker == "QQQ"
+bool dayAllowed =
+     (dayofweek == dayofweek.monday and tradeMonday) or
+     (dayofweek == dayofweek.tuesday and tradeTuesday) or
+     (dayofweek == dayofweek.wednesday and tradeWednesday) or
+     (dayofweek == dayofweek.thursday and tradeThursday) or
+     (dayofweek == dayofweek.friday and tradeFriday)
+
+newTradeDay = inTradeSession and not inTradeSession[1]
+
+var bool dayDone = false
+var bool dayDoneEvent = false
+var int exhaustionBars = 0
+var float sessionHigh = na
+var float sessionLow = na
+var float sessionOpenPrice = na
+var float openingClosePrice = na
+var float openingHigh = na
+var float openingLow = na
+var int v24EntriesToday = 0
+var float priorSessionHigh = na
+var float priorSessionLow = na
+var float priorSessionRange = na
+var int lastExitBar = na
+
+if newTradeDay
+    if not na(sessionHigh) and not na(sessionLow)
+        priorSessionHigh := sessionHigh
+        priorSessionLow := sessionLow
+        priorSessionRange := sessionHigh - sessionLow
+    dayDone := false
+    dayDoneEvent := false
+    exhaustionBars := 0
+    sessionHigh := high
+    sessionLow := low
+    sessionOpenPrice := open
+    openingClosePrice := na
+    openingHigh := na
+    openingLow := na
+    v24EntriesToday := 0
+
+if inTradeSession
+    sessionHigh := math.max(nz(sessionHigh, high), high)
+    sessionLow := math.min(nz(sessionLow, low), low)
+
+if inOpeningRange
+    openingHigh := math.max(nz(openingHigh, high), high)
+    openingLow := math.min(nz(openingLow, low), low)
+    openingClosePrice := close
+
+ema9  = ta.ema(close, emaFastLen)
+ema21 = ta.ema(close, emaMidLen)
+ema50 = ta.ema(close, emaSlowLen)
+vwap  = ta.vwap(hlc3)
+atr   = ta.atr(14)
+atrAvg = ta.sma(atr, 50)
+atrRatio = f_safeDiv(atr, atrAvg, 1.0)
+
+volAvg = ta.sma(volume, rvolLen)
+rvol = f_safeDiv(volume, volAvg, 1.0)
+
+[plusDI, minusDI, adx] = ta.dmi(adxLen, adxSmooth)
+
+barRange = math.max(high - low, syminfo.mintick)
+body = math.abs(close - open)
+bullDisplacement = close > open and body >= atr * bodyATRMin and close >= high - barRange * 0.25
+bearDisplacement = close < open and body >= atr * bodyATRMin and close <= low + barRange * 0.25
+
+footprint fp = request.footprint(fpTicks, fpVA)
+bool fpAvailable = not na(fp)
+float fpTotalVolume = na
+float fpDelta = na
+if fpAvailable
+    fpTotalVolume := footprint.total_volume(fp)
+    fpDelta := footprint.delta(fp)
+float fpDeltaPct = fpAvailable and fpTotalVolume > 0 ? fpDelta / fpTotalVolume : 0.0
+bool fpRequiredMissing = fpMode == "Required" and not fpAvailable
+bool fpLongNotOpposed = fpMode == "Off" or (fpMode == "Use when available" and not fpAvailable) or (fpAvailable and fpDeltaPct >= -fpOpposingVeto)
+bool fpShortNotOpposed = fpMode == "Off" or (fpMode == "Use when available" and not fpAvailable) or (fpAvailable and fpDeltaPct <= fpOpposingVeto)
+bool fpStrongBuy = fpAvailable and fpDeltaPct >= fpStrongDelta
+bool fpStrongSell = fpAvailable and fpDeltaPct <= -fpStrongDelta
+
+pathPerBar = ta.sma(math.abs(close - close[1]), effLen)
+pathDistance = pathPerBar * effLen
+efficiency = f_safeDiv(math.abs(close - close[effLen]), pathDistance, 0.0)
+
+[v217DClose, v217DPrevClose, v217DEma20, v217DEma20Prev, v217DEma50, v217DAtr14, v217DAtr50] = request.security(
+     syminfo.tickerid,
+     "D",
+     [close, close[1], ta.ema(close, 20), ta.ema(close, 20)[1], ta.ema(close, 50), ta.atr(14), ta.sma(ta.atr(14), 50)],
+     gaps = barmerge.gaps_off,
+     lookahead = barmerge.lookahead_off)
+
+float v217DailyVolRatio = f_safeDiv(v217DAtr14, v217DAtr50, 1.0)
+float v217GapATR = not na(sessionOpenPrice) ? f_safeDiv(sessionOpenPrice - v217DClose, v217DAtr14, 0.0) : 0.0
+
+bool v217DailyBull =
+     v217DClose > v217DEma20 and v217DEma20 > v217DEma50 and v217DEma20 >= v217DEma20Prev
+bool v217DailyBear =
+     v217DClose < v217DEma20 and v217DEma20 < v217DEma50 and v217DEma20 <= v217DEma20Prev
+
+vwapCrossSeries = ta.cross(close, vwap) ? 1.0 : 0.0
+vwapCrosses = ta.sma(vwapCrossSeries, chopCrossLookback) * chopCrossLookback
+emaSpreadATR = f_safeDiv(math.abs(ema9 - ema21), atr, 0.0)
+
+chopCondition =
+     (efficiency <= chopEfficiency and vwapCrosses >= chopCrossThreshold) or
+     (adx < minEntryADX and emaSpreadATR < 0.10)
+
+recentHigh = ta.highest(high[1], structureLen)
+recentLow  = ta.lowest(low[1], structureLen)
+
+breakoutLong = not na(recentHigh) and close > recentHigh and bullDisplacement
+breakoutShort = not na(recentLow) and close < recentLow and bearDisplacement
+
+pullbackLong =
+     ema9 > ema21 and ema21 > ema50 and
+     low <= ema21 + atr * pullbackToleranceATR and
+     close > ema9 and close > open
+
+pullbackShort =
+     ema9 < ema21 and ema21 < ema50 and
+     high >= ema21 - atr * pullbackToleranceATR and
+     close < ema9 and close < open
+
+vwapReclaimLong = allowVWAPReclaim and ta.crossover(close, vwap) and ema9 >= ema21 and plusDI > minusDI
+vwapReclaimShort = allowVWAPReclaim and ta.crossunder(close, vwap) and ema9 <= ema21 and minusDI > plusDI
+
+liquiditySweepLong =
+     allowLiquiditySweep and not na(recentLow) and
+     low < recentLow and close > recentLow and close > open
+
+liquiditySweepShort =
+     allowLiquiditySweep and not na(recentHigh) and
+     high > recentHigh and close < recentHigh and close < open
+
+orBreakLong =
+     allowOpeningBreakout and not inOpeningRange and not na(openingHigh) and
+     close > openingHigh and close[1] <= openingHigh and bullDisplacement
+
+orBreakShort =
+     allowOpeningBreakout and not inOpeningRange and not na(openingLow) and
+     close < openingLow and close[1] >= openingLow and bearDisplacement
+
+longTrigger = breakoutLong or pullbackLong or vwapReclaimLong or liquiditySweepLong or orBreakLong
+shortTrigger = breakoutShort or pullbackShort or vwapReclaimShort or liquiditySweepShort or orBreakShort
+
+string longSetupType =
+     orBreakLong ? "OPENING BREAKOUT" :
+     breakoutLong ? "BREAKOUT" :
+     liquiditySweepLong ? "LIQUIDITY REVERSAL" :
+     pullbackLong ? "EMA PULLBACK" :
+     vwapReclaimLong ? "VWAP RECLAIM" : "LONG"
+
+string shortSetupType =
+     orBreakShort ? "OPENING BREAKOUT" :
+     breakoutShort ? "BREAKOUT" :
+     liquiditySweepShort ? "LIQUIDITY REVERSAL" :
+     pullbackShort ? "EMA PULLBACK" :
+     vwapReclaimShort ? "VWAP RECLAIM" : "SHORT"
+
+spyRet = request.security(spySymbol, timeframe.period, close / close[crossBars] - 1.0)
+qqqRet = request.security(qqqSymbol, timeframe.period, close / close[crossBars] - 1.0)
+iwmRet = request.security(iwmSymbol, timeframe.period, close / close[crossBars] - 1.0)
+
+crossThreshold = crossMovePct / 100.0
+
+crossBullCount =
+     (spyRet > crossThreshold ? 1 : 0) +
+     (qqqRet > crossThreshold ? 1 : 0) +
+     (iwmRet > crossThreshold ? 1 : 0)
+
+crossBearCount =
+     (spyRet < -crossThreshold ? 1 : 0) +
+     (qqqRet < -crossThreshold ? 1 : 0) +
+     (iwmRet < -crossThreshold ? 1 : 0)
+
+crossLongNotOpposed = not useCrossMarket or crossBearCount < 2
+crossShortNotOpposed = not useCrossMarket or crossBullCount < 2
+crossStrongLong = not useCrossMarket or crossBullCount >= 2
+crossStrongShort = not useCrossMarket or crossBearCount >= 2
+crossMixed = useCrossMarket and crossBullCount < 2 and crossBearCount < 2
+
+pdh = priorSessionHigh
+pdl = priorSessionLow
+priorDailyATR = priorSessionRange
+
+sessionRange = not na(sessionHigh) and not na(sessionLow) ? sessionHigh - sessionLow : 0.0
+rangeConsumed = not na(priorDailyATR) and priorDailyATR > 0 and sessionRange >= priorDailyATR * dayRangeATRConsumed
+
+longTrendContext = ema9 > ema21 and ema21 >= ema50
+shortTrendContext = ema9 < ema21 and ema21 <= ema50
+
+longVWAPContext = close > vwap
+shortVWAPContext = close < vwap
+
+longForceContext = plusDI > minusDI
+shortForceContext = minusDI > plusDI
+
+longContextCount = f_contextCount(longTrendContext, longVWAPContext, longForceContext)
+shortContextCount = f_contextCount(shortTrendContext, shortVWAPContext, shortForceContext)
+
+longContextOK = longContextCount >= 2
+shortContextOK = shortContextCount >= 2
+
+strongLongTrend =
+     longTrendContext and longVWAPContext and plusDI > minusDI and
+     adx >= strongTrendADX and efficiency >= minEntryEfficiency
+
+strongShortTrend =
+     shortTrendContext and shortVWAPContext and minusDI > plusDI and
+     adx >= strongTrendADX and efficiency >= minEntryEfficiency
+
+pressureContinuationLong =
+     allowPressureContinuation and
+     strongLongTrend and
+     bullDisplacement and
+     ema9 > ema9[1] and ema21 >= ema21[1] and
+     not na(recentHigh) and
+     close <= recentHigh and
+     close >= recentHigh - atr * pressureNearBreakATR
+
+pressureContinuationShort =
+     allowPressureContinuation and
+     strongShortTrend and
+     bearDisplacement and
+     ema9 < ema9[1] and ema21 <= ema21[1] and
+     not na(recentLow) and
+     close >= recentLow and
+     close <= recentLow + atr * pressureNearBreakATR
+
+longSweepTransition =
+     close > ema9 and ema9 > ema9[1] and plusDI > minusDI and
+     (close > vwap or close > ema21)
+
+shortSweepTransition =
+     close < ema9 and ema9 < ema9[1] and minusDI > plusDI and
+     (close < vwap or close < ema21)
+
+longSweepAllowed =
+     not liquiditySweepLong or
+     not requireTransitionForCounterSweep or
+     not strongShortTrend or
+     longSweepTransition
+
+shortSweepAllowed =
+     not liquiditySweepShort or
+     not requireTransitionForCounterSweep or
+     not strongLongTrend or
+     shortSweepTransition
+
+movementQualityOK = atrRatio >= minATRRatio
+efficiencyOK = efficiency >= minEntryEfficiency
+momentumBypassLong = bullDisplacement and (breakoutLong or orBreakLong) and adx >= minEntryADX
+momentumBypassShort = bearDisplacement and (breakoutShort or orBreakShort) and adx >= minEntryADX
+
+entryQualityLong =
+     movementQualityOK and
+     adx >= minEntryADX and
+     crossLongNotOpposed and
+     (efficiencyOK or momentumBypassLong) and
+     (not chopCondition or momentumBypassLong)
+
+entryQualityShort =
+     movementQualityOK and
+     adx >= minEntryADX and
+     crossShortNotOpposed and
+     (efficiencyOK or momentumBypassShort) and
+     (not chopCondition or momentumBypassShort)
+
+upperWick = high - math.max(open, close)
+lowerWick = math.min(open, close) - low
+upperWickFraction = barRange > 0 ? upperWick / barRange : 0.0
+lowerWickFraction = barRange > 0 ? lowerWick / barRange : 0.0
+
+bullishRejection =
+     lowerWickFraction >= reversalWickFraction and
+     close > open and
+     close >= low + barRange * 0.55
+
+bearishRejection =
+     upperWickFraction >= reversalWickFraction and
+     close < open and
+     close <= high - barRange * 0.55
+
+overextendedBull = close > ema21 and atr > 0 and (close - ema21) / atr >= reversalStretchATR
+overextendedBear = close < ema21 and atr > 0 and (ema21 - close) / atr >= reversalStretchATR
+
+bullReversalRisk =
+     overextendedBull and
+     (bearishRejection or close < ema9 or (rvol >= 1.80 and (close < open or fpStrongSell)))
+
+bearReversalRisk =
+     overextendedBear and
+     (bullishRejection or close > ema9 or (rvol >= 1.80 and (close > open or fpStrongBuy)))
+
+float longLeadScore = 0.0
+longLeadScore += longTrendContext ? 18.0 : 0.0
+longLeadScore += ema9 > ema9[1] and ema21 >= ema21[1] ? 8.0 : 0.0
+longLeadScore += close > ema21 ? 7.0 : 0.0
+longLeadScore += close > vwap ? 8.0 : 0.0
+longLeadScore += plusDI > minusDI ? 9.0 : 0.0
+longLeadScore += adx >= minEntryADX ? 6.0 : 0.0
+longLeadScore += adx > adx[1] ? 4.0 : 0.0
+longLeadScore += efficiency >= minEntryEfficiency ? 6.0 : 0.0
+longLeadScore += rvol >= 1.0 ? 5.0 : 0.0
+longLeadScore += (breakoutLong or orBreakLong or pressureContinuationLong) ? 10.0 : 0.0
+longLeadScore += (pullbackLong or vwapReclaimLong or liquiditySweepLong) ? 8.0 : 0.0
+longLeadScore += bullDisplacement ? 7.0 : 0.0
+longLeadScore += useCrossMarket and crossBullCount >= 2 ? 5.0 : 0.0
+longLeadScore += fpStrongBuy ? 5.0 : 0.0
+longLeadScore -= chopCondition ? 18.0 : 0.0
+longLeadScore -= overextendedBull ? 10.0 : 0.0
+longLeadScore -= bullReversalRisk ? 22.0 : 0.0
+longLeadScore := math.max(0.0, math.min(100.0, longLeadScore))
+
+float shortLeadScore = 0.0
+shortLeadScore += shortTrendContext ? 18.0 : 0.0
+shortLeadScore += ema9 < ema9[1] and ema21 <= ema21[1] ? 8.0 : 0.0
+shortLeadScore += close < ema21 ? 7.0 : 0.0
+shortLeadScore += close < vwap ? 8.0 : 0.0
+shortLeadScore += minusDI > plusDI ? 9.0 : 0.0
+shortLeadScore += adx >= minEntryADX ? 6.0 : 0.0
+shortLeadScore += adx > adx[1] ? 4.0 : 0.0
+shortLeadScore += efficiency >= minEntryEfficiency ? 6.0 : 0.0
+shortLeadScore += rvol >= 1.0 ? 5.0 : 0.0
+shortLeadScore += (breakoutShort or orBreakShort or pressureContinuationShort) ? 10.0 : 0.0
+shortLeadScore += (pullbackShort or vwapReclaimShort or liquiditySweepShort) ? 8.0 : 0.0
+shortLeadScore += bearDisplacement ? 7.0 : 0.0
+shortLeadScore += useCrossMarket and crossBearCount >= 2 ? 5.0 : 0.0
+shortLeadScore += fpStrongSell ? 5.0 : 0.0
+shortLeadScore -= chopCondition ? 18.0 : 0.0
+shortLeadScore -= overextendedBear ? 10.0 : 0.0
+shortLeadScore -= bearReversalRisk ? 22.0 : 0.0
+shortLeadScore := math.max(0.0, math.min(100.0, shortLeadScore))
+
+bool longLeadOK = not useLeadGate or (longLeadScore >= leadMinScore and longLeadScore >= shortLeadScore + leadMinEdge)
+bool shortLeadOK = not useLeadGate or (shortLeadScore >= leadMinScore and shortLeadScore >= longLeadScore + leadMinEdge)
+
+weakADXLate = adx < 16.0
+weakEfficiencyLate = efficiency < chopEfficiency
+weakRVOLLate = rvol < 0.78
+weakATRRegimeLate = atrRatio < 0.82
+compressedLate = chopCondition
+mixedMarketsLate = crossMixed
+
+exhaustionCount =
+     (weakADXLate ? 1 : 0) +
+     (weakEfficiencyLate ? 1 : 0) +
+     (weakRVOLLate ? 1 : 0) +
+     (weakATRRegimeLate ? 1 : 0) +
+     (compressedLate ? 1 : 0) +
+     (mixedMarketsLate ? 1 : 0) +
+     (rangeConsumed ? 1 : 0)
+
+lateTrendException =
+     ((strongLongTrend and crossLongNotOpposed) or (strongShortTrend and crossShortNotOpposed)) and
+     efficiency >= lateTrendEfficiency and
+     atrRatio >= 0.90
+
+rawSessionExhausted = inStopEval and exhaustionCount >= exhaustNeeded and not lateTrendException
+
+chartMinutes = timeframe.in_seconds() / 60.0
+exhaustPersistBars = int(math.max(2.0, math.ceil(exhaustPersistMinutes / chartMinutes)))
+
+if rawSessionExhausted
+    exhaustionBars += 1
+else
+    exhaustionBars := 0
+
+sessionExhaustedPersistent = exhaustionBars >= exhaustPersistBars
+
+varip int tradeDirection = 0       // 1 CALL direction, -1 PUT direction
+varip int entryTime = na
+varip int entryBar = na
+varip float entryPrice = na
+varip float entryATR = na
+varip float stopPrice = na
+varip float hardStopPrice = na
+varip float targetPrice = na
+varip float originalTarget = na
+varip float entryLeadScore = na
+varip float tradeMFE = 0.0
+varip float tradeMAE = 0.0
+varip float expectedMinutes = na
+varip bool targetExtended = false
+varip bool closingRequested = false
+varip string activeSetup = ""
+varip string activeEntryTier = ""
+varip string pendingExitReason = ""
+varip int lastMFEBar = na
+varip bool runnerActivated = false
+varip bool selectiveRunnerTrade = false
+
+var int reentryBlockedDirection = 0
+var int reentryBlockBar = na
+
+var int researchTrades = 0
+var int researchDirHits = 0
+var int dirHitWins = 0
+var int researchWinners = 0
+var float totalDurationMinutes = 0.0
+var float totalCapturePct = 0.0
+var float winnerCapturePctTotal = 0.0
+var float dirHitGivebackPctTotal = 0.0
+var int ambiguousSameBarTrades = 0
+var int cleanTrades = 0
+var int cleanWins = 0
+var int dirHitLosses = 0
+var int openingChaseBlocks = 0
+var int openingChaseCallBlocks = 0
+var int openingChasePutBlocks = 0
+var int putEMABlocks = 0
+var int earlyPutBreakoutBlocks = 0
+var int firstHourClimaxCallBlocks = 0
+var int firstHourClimaxPutBlocks = 0
+
+var int diagCallTrades = 0
+var int diagCallWins = 0
+var float diagCallGP = 0.0
+var float diagCallGL = 0.0
+var int diagPutTrades = 0
+var int diagPutWins = 0
+var float diagPutGP = 0.0
+var float diagPutGL = 0.0
+
+var int diagORTrades = 0
+var int diagORWins = 0
+var float diagORGP = 0.0
+var float diagORGL = 0.0
+var int diagBOTrades = 0
+var int diagBOWins = 0
+var float diagBOGP = 0.0
+var float diagBOGL = 0.0
+var int diagLiqTrades = 0
+var int diagLiqWins = 0
+var float diagLiqGP = 0.0
+var float diagLiqGL = 0.0
+var int diagEMATrades = 0
+var int diagEMAWins = 0
+var float diagEMAGP = 0.0
+var float diagEMAGL = 0.0
+var int diagVWAPTrades = 0
+var int diagVWAPWins = 0
+var float diagVWAPGP = 0.0
+var float diagVWAPGL = 0.0
+var int diagEarlyTrades = 0
+var int diagEarlyWins = 0
+var float diagEarlyGP = 0.0
+var float diagEarlyGL = 0.0
+
+varip float diagEntryADX = na
+varip float diagEntryEfficiency = na
+varip float diagEntryRVOL = na
+varip float diagEntryATRRatio = na
+varip float diagEntryLead = na
+varip float diagEntryLeadEdge = na
+varip float diagEntryExt9ATR = na
+varip float diagEntryVWAPDistATR = na
+varip float diagEntryBodyATR = na
+varip float diagEntryRangeATR = na
+varip float diagEntryFPDirectional = na
+varip int diagEntryContextCount = na
+varip int diagEntryCrossClass = na
+varip int diagEntryFPClass = na
+varip int diagEntryMinuteET = na
+varip int diagEntryDOW = na
+varip int diagEntryMonth = na
+varip int diagEntryExhaustion = na
+varip bool diagEntryChop = false
+varip bool diagEntryStrongTrend = false
+varip bool diagLowLossArmed = false
+var int diagSelectiveFailureCuts = 0
+varip bool diagProfitFloorStarted = false
+varip bool diagStrongFloorStarted = false
+
+var float diagTotalMFEATR = 0.0
+var float diagTotalMAEATR = 0.0
+var float diagWinnerMFEATR = 0.0
+var float diagWinnerMAEATR = 0.0
+var float diagLoserMFEATR = 0.0
+var float diagLoserMAEATR = 0.0
+var float diagTotalRealizedR = 0.0
+var float diagWinnerRealizedR = 0.0
+var float diagLoserRealizedR = 0.0
+var float diagWinnerDuration = 0.0
+var float diagLoserDuration = 0.0
+var int diagLosers = 0
+var int diagWinnerCaptureUnder25 = 0
+var int diagWinnerCaptureUnder50 = 0
+var int diagWinnerCaptureOver75 = 0
+var int diagLossAfterMFE15 = 0
+var int diagLossAfterMFE30 = 0
+var int diagLossAfterMFE50 = 0
+var int diagLossAfterMFE75 = 0
+var int diagLossAfterMFE100 = 0
+var int diagSignalConflicts = 0
+
+var array<int> diagDayT = array.new_int(5, 0)
+var array<int> diagDayW = array.new_int(5, 0)
+var array<float> diagDayGP = array.new_float(5, 0.0)
+var array<float> diagDayGL = array.new_float(5, 0.0)
+var array<int> diagTimeT = array.new_int(7, 0)
+var array<int> diagTimeW = array.new_int(7, 0)
+var array<float> diagTimeGP = array.new_float(7, 0.0)
+var array<float> diagTimeGL = array.new_float(7, 0.0)
+var array<int> diagMonthT = array.new_int(12, 0)
+var array<int> diagMonthW = array.new_int(12, 0)
+var array<float> diagMonthGP = array.new_float(12, 0.0)
+var array<float> diagMonthGL = array.new_float(12, 0.0)
+var array<int> diagADXT = array.new_int(4, 0)
+var array<int> diagADXW = array.new_int(4, 0)
+var array<float> diagADXGP = array.new_float(4, 0.0)
+var array<float> diagADXGL = array.new_float(4, 0.0)
+var array<int> diagEffT = array.new_int(4, 0)
+var array<int> diagEffW = array.new_int(4, 0)
+var array<float> diagEffGP = array.new_float(4, 0.0)
+var array<float> diagEffGL = array.new_float(4, 0.0)
+var array<int> diagRVOLT = array.new_int(4, 0)
+var array<int> diagRVOLW = array.new_int(4, 0)
+var array<float> diagRVOLGP = array.new_float(4, 0.0)
+var array<float> diagRVOLGL = array.new_float(4, 0.0)
+var array<int> diagATRT = array.new_int(4, 0)
+var array<int> diagATRW = array.new_int(4, 0)
+var array<float> diagATRGP = array.new_float(4, 0.0)
+var array<float> diagATRGL = array.new_float(4, 0.0)
+var array<int> diagLeadT = array.new_int(4, 0)
+var array<int> diagLeadW = array.new_int(4, 0)
+var array<float> diagLeadGP = array.new_float(4, 0.0)
+var array<float> diagLeadGL = array.new_float(4, 0.0)
+var array<int> diagLeadEdgeT = array.new_int(4, 0)
+var array<int> diagLeadEdgeW = array.new_int(4, 0)
+var array<float> diagLeadEdgeGP = array.new_float(4, 0.0)
+var array<float> diagLeadEdgeGL = array.new_float(4, 0.0)
+var array<int> diagCrossT = array.new_int(3, 0)
+var array<int> diagCrossW = array.new_int(3, 0)
+var array<float> diagCrossGP = array.new_float(3, 0.0)
+var array<float> diagCrossGL = array.new_float(3, 0.0)
+var array<int> diagFPT = array.new_int(4, 0)
+var array<int> diagFPW = array.new_int(4, 0)
+var array<float> diagFPGP = array.new_float(4, 0.0)
+var array<float> diagFPGL = array.new_float(4, 0.0)
+var array<int> diagContextT = array.new_int(2, 0)
+var array<int> diagContextW = array.new_int(2, 0)
+var array<float> diagContextGP = array.new_float(2, 0.0)
+var array<float> diagContextGL = array.new_float(2, 0.0)
+var array<int> diagExtT = array.new_int(4, 0)
+var array<int> diagExtW = array.new_int(4, 0)
+var array<float> diagExtGP = array.new_float(4, 0.0)
+var array<float> diagExtGL = array.new_float(4, 0.0)
+var array<int> diagVWAPDistT = array.new_int(4, 0)
+var array<int> diagVWAPDistW = array.new_int(4, 0)
+var array<float> diagVWAPDistGP = array.new_float(4, 0.0)
+var array<float> diagVWAPDistGL = array.new_float(4, 0.0)
+var array<int> diagBodyT = array.new_int(4, 0)
+var array<int> diagBodyW = array.new_int(4, 0)
+var array<float> diagBodyGP = array.new_float(4, 0.0)
+var array<float> diagBodyGL = array.new_float(4, 0.0)
+var array<int> diagExhaustT = array.new_int(3, 0)
+var array<int> diagExhaustW = array.new_int(3, 0)
+var array<float> diagExhaustGP = array.new_float(3, 0.0)
+var array<float> diagExhaustGL = array.new_float(3, 0.0)
+var array<int> diagMFET = array.new_int(5, 0)
+var array<int> diagMFEW = array.new_int(5, 0)
+var array<float> diagMFEGP = array.new_float(5, 0.0)
+var array<float> diagMFEGL = array.new_float(5, 0.0)
+var array<int> diagMAET = array.new_int(4, 0)
+var array<int> diagMAEW = array.new_int(4, 0)
+var array<float> diagMAEGP = array.new_float(4, 0.0)
+var array<float> diagMAEGL = array.new_float(4, 0.0)
+var array<int> diagDurationT = array.new_int(4, 0)
+var array<int> diagDurationW = array.new_int(4, 0)
+var array<float> diagDurationGP = array.new_float(4, 0.0)
+var array<float> diagDurationGL = array.new_float(4, 0.0)
+var array<int> diagRangeT = array.new_int(4, 0)
+var array<int> diagRangeW = array.new_int(4, 0)
+var array<float> diagRangeGP = array.new_float(4, 0.0)
+var array<float> diagRangeGL = array.new_float(4, 0.0)
+var array<int> diagStateT = array.new_int(3, 0)
+var array<int> diagStateW = array.new_int(3, 0)
+var array<float> diagStateGP = array.new_float(3, 0.0)
+var array<float> diagStateGL = array.new_float(3, 0.0)
+var array<int> diagSideTimeT = array.new_int(14, 0)
+var array<int> diagSideTimeW = array.new_int(14, 0)
+var array<float> diagSideTimeGP = array.new_float(14, 0.0)
+var array<float> diagSideTimeGL = array.new_float(14, 0.0)
+var array<int> diagSideMFET = array.new_int(10, 0)
+var array<int> diagSideMFEW = array.new_int(10, 0)
+var array<float> diagSideMFEGP = array.new_float(10, 0.0)
+var array<float> diagSideMFEGL = array.new_float(10, 0.0)
+var int diagCallLossAfterMFE30 = 0
+var int diagCallLossAfterMFE50 = 0
+var int diagPutLossAfterMFE30 = 0
+var int diagPutLossAfterMFE50 = 0
+var float diagCallWinnerCaptureTotal = 0.0
+var float diagPutWinnerCaptureTotal = 0.0
+var array<int> diagExitT = array.new_int(16, 0)
+var array<int> diagExitW = array.new_int(16, 0)
+var array<float> diagExitGP = array.new_float(16, 0.0)
+var array<float> diagExitGL = array.new_float(16, 0.0)
+var array<int> diagSetupSideT = array.new_int(12, 0)
+var array<int> diagSetupSideW = array.new_int(12, 0)
+var array<float> diagSetupSideGP = array.new_float(12, 0.0)
+var array<float> diagSetupSideGL = array.new_float(12, 0.0)
+var array<int> diagMgmtT = array.new_int(5, 0)
+var array<int> diagMgmtW = array.new_int(5, 0)
+var array<float> diagMgmtGP = array.new_float(5, 0.0)
+var array<float> diagMgmtGL = array.new_float(5, 0.0)
+var array<int> diagTierT = array.new_int(1, 0)
+var array<int> diagTierW = array.new_int(1, 0)
+var array<float> diagTierGP = array.new_float(1, 0.0)
+var array<float> diagTierGL = array.new_float(1, 0.0)
+
+var int diagLongCandidates = 0
+var int diagShortCandidates = 0
+
+var int diagV29RawA = 0
+var int diagV29ATRBlocked = 0
+var int diagV29EffBlocked = 0
+var int diagV29BodyBlocked = 0
+var int diagV29AcceptedA = 0
+var int diagV210ATRRescued = 0
+var int diagLongAccepted = 0
+var int diagShortAccepted = 0
+var array<int> diagLongFilter = array.new_int(18, 0)
+var array<int> diagShortFilter = array.new_int(18, 0)
+var array<int> diagRawLongSetup = array.new_int(6, 0)
+var array<int> diagRawShortSetup = array.new_int(6, 0)
+
+bool callEntryEvent = false
+bool putEntryEvent = false
+bool exitEvent = false
+bool stopDayEvent = false
+
+float histEntryLine = tradeDirection != 0 ? entryPrice : na
+float histStopLine = tradeDirection != 0 ? stopPrice : na
+float histHardStopLine = tradeDirection != 0 ? hardStopPrice : na
+float histTargetLine = tradeDirection != 0 ? targetPrice : na
+
+currentlyInPosition = strategy.position_size != 0
+newClosedTrade = strategy.closedtrades > nz(strategy.closedtrades[1], 0)
+
+orphanTradeState =
+     tradeDirection != 0 and
+     strategy.position_size == 0 and
+     not closingRequested and
+     not na(entryBar) and
+     bar_index > entryBar + 1
+
+barsSinceExit = na(lastExitBar) ? 9999 : bar_index - lastExitBar
+cooldownOK = barsSinceExit > cooldownBars
+
+if reentryBlockedDirection == 1
+    bool longReset =
+         (low <= ema9 and close >= ema9) or
+         low <= ema21 + atr * resetTouchATR or
+         efficiency < minEntryEfficiency * 0.80 or
+         (not na(reentryBlockBar) and bar_index - reentryBlockBar >= sameDirResetMaxBars)
+    if longReset
+        reentryBlockedDirection := 0
+        reentryBlockBar := na
+
+if reentryBlockedDirection == -1
+    bool shortReset =
+         (high >= ema9 and close <= ema9) or
+         high >= ema21 - atr * resetTouchATR or
+         efficiency < minEntryEfficiency * 0.80 or
+         (not na(reentryBlockBar) and bar_index - reentryBlockBar >= sameDirResetMaxBars)
+    if shortReset
+        reentryBlockedDirection := 0
+        reentryBlockBar := na
+
+bool executionReady = executionMode == "Live - Intrabar" or barstate.isconfirmed
+
+canEnter =
+     inTradeSession and
+     dayAllowed and
+     not fpRequiredMissing and
+     not inHardStop and
+     not dayDone and
+     tradeDirection == 0 and
+     strategy.position_size == 0 and
+     cooldownOK and
+     executionReady
+
+longBaseTrigger = longTrigger or pressureContinuationLong
+shortBaseTrigger = shortTrigger or pressureContinuationShort
+
+longSpecialSetup = pullbackLong or vwapReclaimLong
+shortSpecialSetup = pullbackShort or vwapReclaimShort
+longOpeningSetup = orBreakLong
+shortOpeningSetup = orBreakShort
+longContinuationSetup = breakoutLong or pressureContinuationLong or orBreakLong
+shortContinuationSetup = breakoutShort or pressureContinuationShort or orBreakShort
+
+currentMinuteET = hour(time, sessionTZ) * 60 + minute(time, sessionTZ)
+after1200ET = currentMinuteET >= 720
+after1300ET = currentMinuteET >= 780
+inOpeningHourET = currentMinuteET >= 570 and currentMinuteET < 630
+
+longExt9Now = atr > 0 ? (close - ema9) / atr : 0.0
+shortExt9Now = atr > 0 ? (ema9 - close) / atr : 0.0
+longExt21Now = atr > 0 ? (close - ema21) / atr : 0.0
+shortExt21Now = atr > 0 ? (ema21 - close) / atr : 0.0
+longMove3Now = atr > 0 ? (close - close[3]) / atr : 0.0
+shortMove3Now = atr > 0 ? (close[3] - close) / atr : 0.0
+signalBodyATRNow = atr > 0 ? body / atr : 0.0
+signalRangeATRNow = atr > 0 ? barRange / atr : 0.0
+
+longBreakoutStyle = breakoutLong or pressureContinuationLong or orBreakLong
+shortBreakoutStyle = breakoutShort or pressureContinuationShort or orBreakShort
+
+longChaseScore =
+     (longExt9Now >= openingChaseExt9ATR ? 1 : 0) +
+     (longMove3Now >= openingChaseMove3ATR ? 1 : 0) +
+     (signalBodyATRNow >= openingChaseBodyATR ? 1 : 0) +
+     (signalRangeATRNow >= openingChaseRangeATR ? 1 : 0)
+
+shortChaseScore =
+     (shortExt9Now >= openingChaseExt9ATR ? 1 : 0) +
+     (shortMove3Now >= openingChaseMove3ATR ? 1 : 0) +
+     (signalBodyATRNow >= openingChaseBodyATR ? 1 : 0) +
+     (signalRangeATRNow >= openingChaseRangeATR ? 1 : 0)
+
+openingLongChase =
+     useOpeningChaseFilter and
+     inOpeningHourET and
+     longBreakoutStyle and
+     longChaseScore >= openingChaseVotes
+
+openingShortChase =
+     useOpeningChaseFilter and
+     inOpeningHourET and
+     shortBreakoutStyle and
+     shortChaseScore >= openingChaseVotes
+
+longClimaxScore =
+     (longExt9Now >= climaxExt9ATR ? 1 : 0) +
+     (longExt21Now >= climaxExt21ATR ? 1 : 0) +
+     (longMove3Now >= climaxMove3ATR ? 1 : 0) +
+     (signalBodyATRNow >= climaxBodyATR ? 1 : 0) +
+     (rvol >= climaxRVOL ? 1 : 0) +
+     (atrRatio >= climaxATRRatio ? 1 : 0)
+
+shortClimaxScore =
+     (shortExt9Now >= climaxExt9ATR ? 1 : 0) +
+     (shortExt21Now >= climaxExt21ATR ? 1 : 0) +
+     (shortMove3Now >= climaxMove3ATR ? 1 : 0) +
+     (signalBodyATRNow >= climaxBodyATR ? 1 : 0) +
+     (rvol >= climaxRVOL ? 1 : 0) +
+     (atrRatio >= climaxATRRatio ? 1 : 0)
+
+firstHourLongBreakoutClimax =
+     useFirstHourBreakoutClimaxFilter and
+     inOpeningHourET and
+     breakoutLong and not orBreakLong and
+     longClimaxScore >= climaxVotes
+
+firstHourShortBreakoutClimax =
+     useFirstHourBreakoutClimaxFilter and
+     inOpeningHourET and
+     breakoutShort and not orBreakShort and
+     shortClimaxScore >= climaxVotes
+
+longSpecialQuality =
+     not longSpecialSetup or
+     (longContextCount == 3 and
+      adx >= specialSetupMinADX and
+      efficiency >= specialSetupMinEfficiency and
+      crossLongNotOpposed)
+
+shortSpecialQuality =
+     not shortSpecialSetup or
+     (shortContextCount == 3 and
+      adx >= specialSetupMinADX and
+      efficiency >= specialSetupMinEfficiency and
+      crossShortNotOpposed)
+
+putEarlyContinuationOK =
+     not pressureContinuationShort or
+     (not disablePutEarlyContinuation and
+      strongShortTrend and crossStrongShort)
+
+exceptionalEarlyPutBreakout =
+     strongShortTrend and
+     adx >= earlyPutBreakoutMinADX and
+     efficiency >= earlyPutBreakoutMinEfficiency and
+     shortContextCount == 3 and
+     ema9 < ema9[1] and ema21 < ema21[1] and
+     close < ema9 and close < ema21 and close < vwap and
+     (not earlyPutBreakoutNeedCrossStrong or crossStrongShort)
+
+putBreakoutOK =
+     not breakoutShort or
+     shortOpeningSetup or
+     (
+       adx >= putBreakoutMinADX and
+       efficiency >= putBreakoutMinEfficiency and
+       shortContextCount == 3 and
+       ema9 < ema9[1] and ema21 <= ema21[1] and
+       close < ema9 and close < ema21 and close < vwap and
+       (not putBreakoutNeedsExternalConfirm or (strongShortTrend and crossStrongShort)) and
+       (
+         not restrictPutBreakoutBefore0900 or
+         after1200ET or
+         exceptionalEarlyPutBreakout
+       )
+     )
+
+putEMAPullbackOK =
+     not pullbackShort or
+     (
+       not disablePutEMAPullback and
+       (
+         not putEMAPullbackNeedsStrongTrend or
+         (strongShortTrend and crossStrongShort and
+          adx >= putBreakoutMinADX and
+          efficiency >= putBreakoutMinEfficiency)
+       )
+     )
+
+putSideQuality =
+     shortOpeningSetup or
+     (adx >= putMinADX and
+      efficiency >= putMinEfficiency and
+      (not putRequireFullContext or shortContextCount == 3) and
+      putEarlyContinuationOK and
+      putBreakoutOK and
+      putEMAPullbackOK and
+      (crossStrongShort or strongShortTrend))
+
+lateLongQuality =
+     not lateSessionStrict or not after1300ET or
+     (longContinuationSetup and
+      longContextCount == 3 and
+      adx >= lateSessionMinADX and
+      efficiency >= lateSessionMinEfficiency and
+      (crossStrongLong or strongLongTrend))
+
+lateShortQuality =
+     not lateSessionStrict or not after1300ET or
+     (shortContinuationSetup and
+      shortContextCount == 3 and
+      adx >= lateSessionMinADX and
+      efficiency >= lateSessionMinEfficiency and
+      (crossStrongShort or strongShortTrend))
+
+bool v23ATRZoneOK = not v23AvoidATRTransition or atrRatio < 0.80 or atrRatio >= 1.00
+bool v23NormalShapeLong =
+     longLeadScore >= v23NormalLeadMin and longLeadScore < v23NormalLeadMax and
+     efficiency >= v23MinEfficiency and efficiency < v23MaxEfficiency and
+     rvol < v23MaxRVOL and
+     signalRangeATRNow < v23MaxRangeATR and
+     longExt9Now < v23MaxExt9ATR and
+     not strongLongTrend
+
+bool v23NormalShapeShort =
+     shortLeadScore >= v23NormalLeadMin and shortLeadScore < v23NormalLeadMax and
+     efficiency >= v23MinEfficiency and efficiency < v23MaxEfficiency and
+     rvol < v23MaxRVOL and
+     signalRangeATRNow < v23MaxRangeATR and
+     shortExt9Now < v23MaxExt9ATR and
+     not strongShortTrend
+
+bool v23EarlyShapeLong =
+     pressureContinuationLong and not longTrigger and
+     longLeadScore >= v23EarlyLeadMin and longLeadScore < v23EarlyLeadMax and
+     signalRangeATRNow < v23MaxRangeATR * 1.15 and
+     rvol < v23MaxRVOL * 1.35
+
+bool v23CallTimeOK =
+     currentMinuteET >= 570 and currentMinuteET < 780 and
+     (not v23BlockCall0700to0800 or currentMinuteET < 600 or currentMinuteET >= 660) and
+     (not v23BlockCallAfter1000 or currentMinuteET < 780)
+
+bool v23PutORTimeOK =
+     not v23PutOpeningOnly0700to0800 or
+     (currentMinuteET >= 600 and currentMinuteET < 660)
+
+bool v23PutBreakTimeOK =
+     not v23PutBreakoutOnly0800to0900 or
+     (currentMinuteET >= 660 and currentMinuteET < 720)
+
+bool v23CallFamily =
+     v23EarlyShapeLong or
+     (breakoutLong and not orBreakLong and v23NormalShapeLong)
+
+bool v23PutFamily =
+     (orBreakShort and v23PutORTimeOK and
+      shortLeadScore >= v23NormalLeadMin and shortLeadScore < v23NormalLeadMax and
+      efficiency >= v23MinEfficiency and efficiency < v23MaxEfficiency and
+      signalRangeATRNow < v23MaxRangeATR and rvol < v23MaxRVOL) or
+     (breakoutShort and not orBreakShort and v23PutBreakTimeOK and v23NormalShapeShort)
+
+bool v23PrecisionLongSignal =
+     canEnter and reentryBlockedDirection != 1 and
+     v23CallTimeOK and v23ATRZoneOK and v23CallFamily and
+     longContextOK and adx >= minEntryADX and
+     crossLongNotOpposed and fpLongNotOpposed and
+     not chopCondition and not bullReversalRisk and
+     not openingLongChase and not firstHourLongBreakoutClimax
+
+bool v23PrecisionShortSignal =
+     canEnter and reentryBlockedDirection != -1 and
+     v23ATRZoneOK and v23PutFamily and
+     shortContextOK and adx >= minEntryADX and
+     crossShortNotOpposed and fpShortNotOpposed and
+     not chopCondition and not bearReversalRisk and
+     not openingShortChase and not firstHourShortBreakoutClimax
+
+bool v24CloseWindow = currentMinuteET >= 930 and currentMinuteET < 960
+bool v24DailyRoom = v24EntriesToday < v24MaxEntriesPerDay
+
+bool v24NormalCanEnter =
+     inTradeSession and dayAllowed and not fpRequiredMissing and
+     not inHardStop and not dayDone and tradeDirection == 0 and
+     strategy.position_size == 0 and cooldownOK and executionReady and
+     v24DailyRoom and currentMinuteET < 900
+
+bool v24CloseCanEnter =
+     inTradeSession and dayAllowed and not fpRequiredMissing and
+     tradeDirection == 0 and strategy.position_size == 0 and
+     cooldownOK and executionReady and v24DailyRoom and v24CloseWindow
+
+float v24LongSetupPts =
+     pressureContinuationLong and not longTrigger ? 34.0 :
+     breakoutLong and not orBreakLong ? 30.0 :
+     orBreakLong ? 16.0 :
+     liquiditySweepLong ? 14.0 :
+     vwapReclaimLong ? 12.0 :
+     pullbackLong ? 10.0 : 0.0
+
+float v24ShortSetupPts =
+     orBreakShort ? 26.0 :
+     breakoutShort and not orBreakShort ? 24.0 :
+     pressureContinuationShort and not shortTrigger ? 18.0 :
+     liquiditySweepShort ? 14.0 :
+     vwapReclaimShort ? 8.0 :
+     pullbackShort ? 8.0 : 0.0
+
+float v24LongTimePts =
+     currentMinuteET < 600 ? 15.0 :
+     currentMinuteET < 660 ? -4.0 :
+     currentMinuteET < 720 ? 15.0 :
+     currentMinuteET < 780 ? 7.0 :
+     currentMinuteET < 840 ? -14.0 :
+     currentMinuteET < 900 ? 0.0 : -20.0
+
+float v24ShortTimePts =
+     currentMinuteET < 600 ? 5.0 :
+     currentMinuteET < 660 ? 12.0 :
+     currentMinuteET < 720 ? 15.0 :
+     currentMinuteET < 780 ? -10.0 :
+     currentMinuteET < 840 ? -12.0 :
+     currentMinuteET < 900 ? 0.0 : -20.0
+
+float v24LongLeadPts =
+     longLeadScore >= 80 ? 6.0 :
+     longLeadScore >= 60 ? 10.0 :
+     longLeadScore >= 50 ? 4.0 : -8.0
+
+float v24ShortLeadPts =
+     shortLeadScore >= 80 ? 6.0 :
+     shortLeadScore >= 60 ? 10.0 :
+     shortLeadScore >= 50 ? 4.0 : -8.0
+
+float v24EfficiencyPts =
+     efficiency >= 0.27 and efficiency < 0.55 ? 8.0 :
+     efficiency >= 0.18 and efficiency < 0.27 ? 2.0 :
+     efficiency >= 0.55 ? -4.0 : -8.0
+
+float v24ADXPts =
+     adx >= 18 and adx < 23 ? 6.0 :
+     adx >= minEntryADX and adx < 18 ? 4.0 :
+     adx >= 23 and adx < 30 ? 0.0 :
+     adx >= 30 ? -2.0 : -8.0
+
+float v24LongContextPts = longContextCount == 2 ? 7.0 : longContextCount >= 3 ? 2.0 : -10.0
+float v24ShortContextPts = shortContextCount == 2 ? 7.0 : shortContextCount >= 3 ? 2.0 : -10.0
+
+float v24RVOLPts = rvol < 1.30 ? 4.0 : -5.0
+float v24ATRPts =
+     atrRatio < 0.80 ? -5.0 :
+     atrRatio < 1.00 ? -2.0 :
+     atrRatio < 1.20 ? 6.0 : 4.0
+
+float v24RangePts =
+     signalRangeATRNow < 1.20 ? 5.0 :
+     signalRangeATRNow < 1.60 ? 0.0 : -7.0
+
+float v24LongExtPts =
+     longExt9Now >= 0.25 and longExt9Now < 0.80 ? 4.0 :
+     longExt9Now < 1.20 ? 1.0 : -6.0
+
+float v24ShortExtPts =
+     shortExt9Now >= 0.25 and shortExt9Now < 0.80 ? 4.0 :
+     shortExt9Now < 1.20 ? 1.0 : -6.0
+
+float v24LongCrossPts = crossStrongLong ? 4.0 : crossMixed ? -2.0 : 0.0
+float v24ShortCrossPts = crossStrongShort ? 4.0 : crossMixed ? -2.0 : 0.0
+float v24LongFPPts = fpMode == "Off" or not fpAvailable ? 0.0 : fpStrongBuy ? 4.0 : fpDeltaPct >= 0 ? 2.0 : 0.0
+float v24ShortFPPts = fpMode == "Off" or not fpAvailable ? 0.0 : fpStrongSell ? 4.0 : fpDeltaPct <= 0 ? 2.0 : 0.0
+
+float v24LongOpportunityScore =
+     v24LongSetupPts + v24LongTimePts + v24LongLeadPts +
+     v24EfficiencyPts + v24ADXPts + v24LongContextPts +
+     v24RVOLPts + v24ATRPts + v24RangePts + v24LongExtPts +
+     v24LongCrossPts + v24LongFPPts
+
+float v24ShortOpportunityScore =
+     v24ShortSetupPts + v24ShortTimePts + v24ShortLeadPts +
+     v24EfficiencyPts + v24ADXPts + v24ShortContextPts +
+     v24RVOLPts + v24ATRPts + v24RangePts + v24ShortExtPts +
+     v24ShortCrossPts + v24ShortFPPts
+
+bool v24LongScoreSignal =
+     v24NormalCanEnter and reentryBlockedDirection != 1 and
+     longBaseTrigger and longContextOK and adx >= minEntryADX and
+     not chopCondition and crossLongNotOpposed and fpLongNotOpposed and
+     not bullReversalRisk and not openingLongChase and
+     not firstHourLongBreakoutClimax and
+     v24LongOpportunityScore >= v24LongScoreMin
+
+bool v24ShortScoreSignal =
+     v24NormalCanEnter and reentryBlockedDirection != -1 and
+     shortBaseTrigger and shortContextOK and adx >= minEntryADX and
+     not chopCondition and crossShortNotOpposed and fpShortNotOpposed and
+     not bearReversalRisk and not openingShortChase and
+     not firstHourShortBreakoutClimax and
+     v24ShortOpportunityScore >= v24ShortScoreMin
+
+float v24OpeningDriveATR =
+     atr > 0 and not na(sessionOpenPrice) and not na(openingClosePrice) ?
+     (openingClosePrice - sessionOpenPrice) / atr : 0.0
+
+bool v24LongCloseMomentum =
+     v24EnableCloseMomentum and v24CloseCanEnter and
+     v24OpeningDriveATR >= v24CloseOpenDriveATR and
+     close > sessionOpenPrice and close > vwap and
+     ema9 > ema21 and plusDI > minusDI and
+     longContextCount >= 2 and longLeadScore >= v24CloseLeadMin and
+     efficiency >= v24CloseMinEfficiency and
+     crossLongNotOpposed and fpLongNotOpposed and
+     not bullReversalRisk and signalRangeATRNow < 1.60
+
+bool v24ShortCloseMomentum =
+     v24EnableCloseMomentum and v24CloseCanEnter and
+     v24OpeningDriveATR <= -v24CloseOpenDriveATR and
+     close < sessionOpenPrice and close < vwap and
+     ema9 < ema21 and minusDI > plusDI and
+     shortContextCount >= 2 and shortLeadScore >= v24CloseLeadMin and
+     efficiency >= v24CloseMinEfficiency and
+     crossShortNotOpposed and fpShortNotOpposed and
+     not bearReversalRisk and signalRangeATRNow < 1.60
+
+bool v29ATRInDeadZone =
+     v29SkipATRDeadZone and atrRatio >= v29ATRDeadLow and atrRatio < v29ATRDeadHigh
+
+bool v29EfficiencyQualityOK =
+     not v29UseEfficiencyCap or efficiency <= v29MaxEfficiency
+
+bool v29BodyQualityOK =
+     not v29UseMinBody or signalBodyATRNow >= v29MinBodyATR
+
+bool v210LongContextOK = not v210RequireContext3 or longContextCount >= 3
+bool v210ShortContextOK = not v210RequireContext3 or shortContextCount >= 3
+
+bool v210LongDI_OK = not v210RequireDirectionDI or plusDI > minusDI
+bool v210ShortDI_OK = not v210RequireDirectionDI or minusDI > plusDI
+
+bool v210LongFlowOK =
+     not v210RequireOneFlowConfirm or
+     crossStrongLong or fpStrongBuy
+
+bool v210ShortFlowOK =
+     not v210RequireOneFlowConfirm or
+     crossStrongShort or fpStrongSell
+
+bool v210LongATRRescue =
+     useV210ATRRescue and v29ATRInDeadZone and
+     v210LongContextOK and longLeadScore >= v210MinLead and adx >= v210MinADX and
+     v210LongDI_OK and v210LongFlowOK and
+     crossLongNotOpposed and fpLongNotOpposed and
+     not chopCondition and not bullReversalRisk
+
+bool v210ShortATRRescue =
+     useV210ATRRescue and v29ATRInDeadZone and
+     v210ShortContextOK and shortLeadScore >= v210MinLead and adx >= v210MinADX and
+     v210ShortDI_OK and v210ShortFlowOK and
+     crossShortNotOpposed and fpShortNotOpposed and
+     not chopCondition and not bearReversalRisk
+
+bool v210LongATRQualityOK =
+     not v29SkipATRDeadZone or not v29ATRInDeadZone or v210LongATRRescue
+
+bool v210ShortATRQualityOK =
+     not v29SkipATRDeadZone or not v29ATRInDeadZone or v210ShortATRRescue
+
+bool v29LongCoreQualityOK =
+     not useV29CorePruning or
+     (v210LongATRQualityOK and v29EfficiencyQualityOK and v29BodyQualityOK)
+
+bool v29ShortCoreQualityOK =
+     not useV29CorePruning or
+     (v210ShortATRQualityOK and v29EfficiencyQualityOK and v29BodyQualityOK)
+
+bool v214LongEarlyContinuation = pressureContinuationLong and not longTrigger
+bool v214ShortEarlyContinuation = pressureContinuationShort and not shortTrigger
+
+bool v215WednesdayORWindow = dayofweek == dayofweek.wednesday and currentMinuteET >= 660 and currentMinuteET < 720
+bool v215LongHistoryOK =
+     not (v215BlockWednesdayOR1112 and v215WednesdayORWindow and longSetupType == "OPENING BREAKOUT")
+bool v215ShortHistoryOK =
+     not (v215BlockFridayShortBreakout and dayofweek == dayofweek.friday and shortSetupType == "BREAKOUT") and
+     not (v215BlockWednesdayOR1112 and v215WednesdayORWindow and shortSetupType == "OPENING BREAKOUT")
+
+float v217GapSmallATR = 0.15
+float v217GapLargeATR = 0.40
+float v217DailyVolLow = 0.85
+float v217DailyVolHigh = 1.10
+float v217RangeADX = 18.0
+float v217TrendEfficiency = 0.27
+
+bool v217LongFlowOpposed = crossStrongShort or fpStrongSell
+bool v217LongFlowF1 =
+     not v217LongFlowOpposed and
+     ((crossStrongLong and not fpStrongBuy) or (fpStrongBuy and not crossStrongLong))
+
+bool v217LongLowVolFlowSetup =
+     longSetupType == "BREAKOUT" or
+     longSetupType == "OPENING BREAKOUT" or
+     longSetupType == "VWAP RECLAIM"
+
+bool v217LongLowVolFlowTrap =
+     v217BlockLowVolLongFlow and
+     v217LongLowVolFlowSetup and
+     v217DailyVolRatio < v217DailyVolLow and
+     v217LongFlowF1
+
+bool v217LongFlatGap = math.abs(v217GapATR) < v217GapSmallATR
+bool v217ShortFlatGap = v217LongFlatGap
+
+bool v217LongLowVolFlatGapBreakout =
+     v217BlockLowVolFlatGapBreakout and
+     longSetupType == "BREAKOUT" and
+     v217DailyVolRatio < v217DailyVolLow and
+     v217LongFlatGap
+
+bool v217ShortLowVolFlatGapBreakout =
+     v217BlockLowVolFlatGapBreakout and
+     shortSetupType == "BREAKOUT" and
+     v217DailyVolRatio < v217DailyVolLow and
+     v217ShortFlatGap
+
+bool v217RangeState = adx < v217RangeADX or efficiency < v217TrendEfficiency
+bool v217HighDailyVol = v217DailyVolRatio >= v217DailyVolHigh
+
+float v217LongSideGap = v217GapATR
+float v217ShortSideGap = -v217GapATR
+bool v217LongSmallAdverseGap = v217LongSideGap <= -v217GapSmallATR and v217LongSideGap > -v217GapLargeATR
+bool v217ShortSmallAdverseGap = v217ShortSideGap <= -v217GapSmallATR and v217ShortSideGap > -v217GapLargeATR
+
+bool v217LongRangeTrapSetup =
+     longSetupType == "BREAKOUT" or
+     longSetupType == "OPENING BREAKOUT" or
+     longSetupType == "VWAP RECLAIM"
+bool v217ShortRangeTrapSetup =
+     shortSetupType == "BREAKOUT" or
+     shortSetupType == "OPENING BREAKOUT" or
+     shortSetupType == "VWAP RECLAIM"
+
+bool v217LongRangeHighVolTrap =
+     v217BlockRangeHighVolAdverseGap and
+     v217LongRangeTrapSetup and v217RangeState and v217HighDailyVol and v217LongSmallAdverseGap
+
+bool v217ShortRangeHighVolTrap =
+     v217BlockRangeHighVolAdverseGap and
+     v217ShortRangeTrapSetup and v217RangeState and v217HighDailyVol and v217ShortSmallAdverseGap
+
+bool v217LongAligned = v217DailyBull
+bool v217ShortAligned = v217DailyBear
+
+bool v217LongAlignedLowVolAdverseGapBreakout =
+     v217BlockAlignedLowVolAdverseGapBreakout and
+     longSetupType == "BREAKOUT" and v217LongAligned and
+     v217DailyVolRatio < v217DailyVolLow and v217LongSmallAdverseGap
+
+bool v217ShortAlignedLowVolAdverseGapBreakout =
+     v217BlockAlignedLowVolAdverseGapBreakout and
+     shortSetupType == "BREAKOUT" and v217ShortAligned and
+     v217DailyVolRatio < v217DailyVolLow and v217ShortSmallAdverseGap
+
+bool v217LongRouterOK =
+     not v217UseRouter or
+     not (v217LongLowVolFlowTrap or
+          v217LongLowVolFlatGapBreakout or
+          v217LongRangeHighVolTrap or
+          v217LongAlignedLowVolAdverseGapBreakout)
+
+bool v217ShortRouterOK =
+     not v217UseRouter or
+     not (v217ShortLowVolFlatGapBreakout or
+          v217ShortRangeHighVolTrap or
+          v217ShortAlignedLowVolAdverseGapBreakout)
+
+bool v29LongACore =
+     (v23PrecisionLongSignal or v24LongScoreSignal or v24LongCloseMomentum) and
+     v29LongCoreQualityOK and not v214LongEarlyContinuation and v215LongHistoryOK and v217LongRouterOK
+
+bool v29ShortACore =
+     (v23PrecisionShortSignal or v24ShortScoreSignal or v24ShortCloseMomentum) and
+     v29ShortCoreQualityOK and not v214ShortEarlyContinuation and v215ShortHistoryOK and v217ShortRouterOK
+
+f_v29a_attribution_id(string setupName, int sideDir) =>
+    string id = ""
+    if v29AAttributionMode == "SETUP"
+        id := setupName
+    else if v29AAttributionMode == "TIME"
+        id := currentMinuteET < 600 ? "09:30-10:00 ET" :
+              currentMinuteET < 660 ? "10:00-11:00 ET" :
+              currentMinuteET < 720 ? "11:00-12:00 ET" :
+              currentMinuteET < 780 ? "12:00-13:00 ET" :
+              currentMinuteET < 840 ? "13:00-14:00 ET" :
+              currentMinuteET < 900 ? "14:00-15:00 ET" : "15:00+ ET"
+    else if v29AAttributionMode == "DAY"
+        id := dayofweek == dayofweek.monday ? "MONDAY" :
+              dayofweek == dayofweek.tuesday ? "TUESDAY" :
+              dayofweek == dayofweek.wednesday ? "WEDNESDAY" :
+              dayofweek == dayofweek.thursday ? "THURSDAY" : "FRIDAY"
+    else if v29AAttributionMode == "ATR"
+        id := atrRatio < 0.80 ? "ATR <0.80" :
+              atrRatio < 1.00 ? "ATR 0.80-1.00" :
+              atrRatio < 1.20 ? "ATR 1.00-1.20" : "ATR >=1.20"
+    else if v29AAttributionMode == "EFFICIENCY"
+        id := efficiency < 0.27 ? "EFF <0.27" :
+              efficiency < 0.40 ? "EFF 0.27-0.40" :
+              efficiency < 0.55 ? "EFF 0.40-0.55" : "EFF >=0.55"
+    else
+        int ctx = sideDir == 1 ? longContextCount : shortContextCount
+        id := ctx >= 3 ? "CONTEXT 3/3" : "CONTEXT 2/3"
+    id
+
+bool oldLongSignal =
+     canEnter and
+     reentryBlockedDirection != 1 and
+     longBaseTrigger and longContextOK and entryQualityLong and
+     longSweepAllowed and
+     longSpecialQuality and
+     lateLongQuality and
+     fpLongNotOpposed and
+     longLeadOK and
+     not bullReversalRisk and
+     not openingLongChase and
+     not firstHourLongBreakoutClimax
+
+bool oldShortSignal =
+     canEnter and
+     reentryBlockedDirection != -1 and
+     shortBaseTrigger and shortContextOK and entryQualityShort and
+     shortSweepAllowed and
+     shortSpecialQuality and
+     putSideQuality and
+     lateShortQuality and
+     fpShortNotOpposed and
+     shortLeadOK and
+     not bearReversalRisk and
+     (not blockNewPutsAfter1000 or not after1300ET) and
+     not openingShortChase and
+     not firstHourShortBreakoutClimax
+
+longSignal =
+     useV24Opportunity ?
+     (v24DailyRoom and v29LongACore) :
+     useV23Precision ? v23PrecisionLongSignal : oldLongSignal
+
+shortSignal =
+     useV24Opportunity ?
+     (v24DailyRoom and v29ShortACore) :
+     useV23Precision ? v23PrecisionShortSignal : oldShortSignal
+
+bool diagRawV29LongA =
+     v23PrecisionLongSignal or v24LongScoreSignal or v24LongCloseMomentum
+bool diagRawV29ShortA =
+     v23PrecisionShortSignal or v24ShortScoreSignal or v24ShortCloseMomentum
+bool diagRawV29A = diagRawV29LongA or diagRawV29ShortA
+
+if tradeDirection == 0 and strategy.position_size == 0 and executionReady and diagRawV29A
+    diagV29RawA += 1
+
+    bool diagATRQuality =
+         (diagRawV29LongA and v210LongATRQualityOK) or
+         (diagRawV29ShortA and v210ShortATRQualityOK)
+    bool diagRescued =
+         (diagRawV29LongA and v210LongATRRescue) or
+         (diagRawV29ShortA and v210ShortATRRescue)
+    bool diagCoreQuality =
+         (diagRawV29LongA and v29LongCoreQualityOK) or
+         (diagRawV29ShortA and v29ShortCoreQualityOK)
+
+    if not diagATRQuality
+        diagV29ATRBlocked += 1
+    if diagRescued
+        diagV210ATRRescued += 1
+    if not v29EfficiencyQualityOK
+        diagV29EffBlocked += 1
+    if not v29BodyQualityOK
+        diagV29BodyBlocked += 1
+    if diagCoreQuality
+        diagV29AcceptedA += 1
+
+diagCandidateWindow =
+     inTradeSession and dayAllowed and
+     not fpRequiredMissing and not inHardStop and not dayDone and
+     tradeDirection == 0 and strategy.position_size == 0 and executionReady
+
+if diagCandidateWindow and longBaseTrigger
+    diagLongCandidates += 1
+    if orBreakLong
+        array.set(diagRawLongSetup, 0, array.get(diagRawLongSetup, 0) + 1)
+    if breakoutLong
+        array.set(diagRawLongSetup, 1, array.get(diagRawLongSetup, 1) + 1)
+    if liquiditySweepLong
+        array.set(diagRawLongSetup, 2, array.get(diagRawLongSetup, 2) + 1)
+    if pullbackLong
+        array.set(diagRawLongSetup, 3, array.get(diagRawLongSetup, 3) + 1)
+    if vwapReclaimLong
+        array.set(diagRawLongSetup, 4, array.get(diagRawLongSetup, 4) + 1)
+    if pressureContinuationLong and not longTrigger
+        array.set(diagRawLongSetup, 5, array.get(diagRawLongSetup, 5) + 1)
+    if not cooldownOK
+        array.set(diagLongFilter, 0, array.get(diagLongFilter, 0) + 1)
+    if reentryBlockedDirection == 1
+        array.set(diagLongFilter, 1, array.get(diagLongFilter, 1) + 1)
+    if not longContextOK
+        array.set(diagLongFilter, 2, array.get(diagLongFilter, 2) + 1)
+    if not movementQualityOK
+        array.set(diagLongFilter, 3, array.get(diagLongFilter, 3) + 1)
+    if adx < minEntryADX
+        array.set(diagLongFilter, 4, array.get(diagLongFilter, 4) + 1)
+    if not (efficiencyOK or momentumBypassLong)
+        array.set(diagLongFilter, 5, array.get(diagLongFilter, 5) + 1)
+    if chopCondition and not momentumBypassLong
+        array.set(diagLongFilter, 6, array.get(diagLongFilter, 6) + 1)
+    if not crossLongNotOpposed
+        array.set(diagLongFilter, 7, array.get(diagLongFilter, 7) + 1)
+    if not longSweepAllowed
+        array.set(diagLongFilter, 8, array.get(diagLongFilter, 8) + 1)
+    if not longSpecialQuality
+        array.set(diagLongFilter, 9, array.get(diagLongFilter, 9) + 1)
+    if not lateLongQuality
+        array.set(diagLongFilter, 10, array.get(diagLongFilter, 10) + 1)
+    if not fpLongNotOpposed
+        array.set(diagLongFilter, 11, array.get(diagLongFilter, 11) + 1)
+    if not longLeadOK
+        array.set(diagLongFilter, 12, array.get(diagLongFilter, 12) + 1)
+    if bullReversalRisk
+        array.set(diagLongFilter, 13, array.get(diagLongFilter, 13) + 1)
+    if openingLongChase
+        array.set(diagLongFilter, 14, array.get(diagLongFilter, 14) + 1)
+    if firstHourLongBreakoutClimax
+        array.set(diagLongFilter, 15, array.get(diagLongFilter, 15) + 1)
+
+if diagCandidateWindow and shortBaseTrigger
+    diagShortCandidates += 1
+    if orBreakShort
+        array.set(diagRawShortSetup, 0, array.get(diagRawShortSetup, 0) + 1)
+    if breakoutShort
+        array.set(diagRawShortSetup, 1, array.get(diagRawShortSetup, 1) + 1)
+    if liquiditySweepShort
+        array.set(diagRawShortSetup, 2, array.get(diagRawShortSetup, 2) + 1)
+    if pullbackShort
+        array.set(diagRawShortSetup, 3, array.get(diagRawShortSetup, 3) + 1)
+    if vwapReclaimShort
+        array.set(diagRawShortSetup, 4, array.get(diagRawShortSetup, 4) + 1)
+    if pressureContinuationShort and not shortTrigger
+        array.set(diagRawShortSetup, 5, array.get(diagRawShortSetup, 5) + 1)
+    if not cooldownOK
+        array.set(diagShortFilter, 0, array.get(diagShortFilter, 0) + 1)
+    if reentryBlockedDirection == -1
+        array.set(diagShortFilter, 1, array.get(diagShortFilter, 1) + 1)
+    if not shortContextOK
+        array.set(diagShortFilter, 2, array.get(diagShortFilter, 2) + 1)
+    if not movementQualityOK
+        array.set(diagShortFilter, 3, array.get(diagShortFilter, 3) + 1)
+    if adx < minEntryADX
+        array.set(diagShortFilter, 4, array.get(diagShortFilter, 4) + 1)
+    if not (efficiencyOK or momentumBypassShort)
+        array.set(diagShortFilter, 5, array.get(diagShortFilter, 5) + 1)
+    if chopCondition and not momentumBypassShort
+        array.set(diagShortFilter, 6, array.get(diagShortFilter, 6) + 1)
+    if not crossShortNotOpposed
+        array.set(diagShortFilter, 7, array.get(diagShortFilter, 7) + 1)
+    if not shortSweepAllowed
+        array.set(diagShortFilter, 8, array.get(diagShortFilter, 8) + 1)
+    if not shortSpecialQuality
+        array.set(diagShortFilter, 9, array.get(diagShortFilter, 9) + 1)
+    if not lateShortQuality
+        array.set(diagShortFilter, 10, array.get(diagShortFilter, 10) + 1)
+    if not fpShortNotOpposed
+        array.set(diagShortFilter, 11, array.get(diagShortFilter, 11) + 1)
+    if not shortLeadOK
+        array.set(diagShortFilter, 12, array.get(diagShortFilter, 12) + 1)
+    if bearReversalRisk
+        array.set(diagShortFilter, 13, array.get(diagShortFilter, 13) + 1)
+    if openingShortChase
+        array.set(diagShortFilter, 14, array.get(diagShortFilter, 14) + 1)
+    if firstHourShortBreakoutClimax
+        array.set(diagShortFilter, 15, array.get(diagShortFilter, 15) + 1)
+    if not putSideQuality
+        array.set(diagShortFilter, 16, array.get(diagShortFilter, 16) + 1)
+    if blockNewPutsAfter1000 and after1300ET
+        array.set(diagShortFilter, 17, array.get(diagShortFilter, 17) + 1)
+
+r010PutBaseCandidate =
+     canEnter and
+     reentryBlockedDirection != -1 and
+     shortBaseTrigger and shortContextOK and entryQualityShort and
+     shortSweepAllowed and
+     shortSpecialQuality and
+     lateShortQuality and
+     (not blockNewPutsAfter1000 or not after1300ET) and
+     not openingShortChase
+
+if r010PutBaseCandidate and pullbackShort and disablePutEMAPullback
+    putEMABlocks += 1
+
+if r010PutBaseCandidate and breakoutShort and not shortOpeningSetup and
+   restrictPutBreakoutBefore0900 and not after1200ET and not exceptionalEarlyPutBreakout
+    earlyPutBreakoutBlocks += 1
+
+longWouldPassWithoutChase =
+     canEnter and reentryBlockedDirection != 1 and
+     longBaseTrigger and longContextOK and entryQualityLong and
+     longSweepAllowed and longSpecialQuality and lateLongQuality
+
+shortWouldPassWithoutChase =
+     canEnter and reentryBlockedDirection != -1 and
+     shortBaseTrigger and shortContextOK and entryQualityShort and
+     shortSweepAllowed and shortSpecialQuality and putSideQuality and
+     lateShortQuality and (not blockNewPutsAfter1000 or not after1300ET)
+
+if longWouldPassWithoutChase and openingLongChase
+    openingChaseBlocks += 1
+    openingChaseCallBlocks += 1
+
+if shortWouldPassWithoutChase and openingShortChase
+    openingChaseBlocks += 1
+    openingChasePutBlocks += 1
+
+r011LongWithoutClimax =
+     canEnter and reentryBlockedDirection != 1 and
+     longBaseTrigger and longContextOK and entryQualityLong and
+     longSweepAllowed and longSpecialQuality and lateLongQuality and
+     not openingLongChase
+
+r011ShortWithoutClimax =
+     canEnter and reentryBlockedDirection != -1 and
+     shortBaseTrigger and shortContextOK and entryQualityShort and
+     shortSweepAllowed and shortSpecialQuality and putSideQuality and
+     lateShortQuality and
+     (not blockNewPutsAfter1000 or not after1300ET) and
+     not openingShortChase
+
+if r011LongWithoutClimax and firstHourLongBreakoutClimax
+    firstHourClimaxCallBlocks += 1
+
+if r011ShortWithoutClimax and firstHourShortBreakoutClimax
+    firstHourClimaxPutBlocks += 1
+
+takeLong = longSignal and (not shortSignal or longContextCount > shortContextCount)
+takeShort = shortSignal and (not longSignal or shortContextCount > longContextCount)
+
+if longSignal and shortSignal
+    diagSignalConflicts += 1
+
+if takeLong
+    diagLongAccepted += 1
+if takeShort
+    diagShortAccepted += 1
+
+if takeLong
+    bool isFast = breakoutLong or orBreakLong or vwapReclaimLong or v24LongCloseMomentum
+    bool isSpecialCapture = pullbackLong or vwapReclaimLong
+    string chosenSetup = v24LongCloseMomentum ? "CLOSE MOMENTUM" : pressureContinuationLong and not longTrigger ? "EARLY CONTINUATION" : longSetupType
+    bool highConvictionRunner =
+         useSelectiveRunner and
+         (chosenSetup == "BREAKOUT" or chosenSetup == "OPENING BREAKOUT") and
+         longContextCount >= 3 and atrRatio >= selectiveRunnerMinATRRatio and
+         adx >= selectiveRunnerMinADX and longLeadScore >= selectiveRunnerMinLead and
+         (crossStrongLong or fpStrongBuy)
+    float chosenTargetATR =
+         highConvictionRunner ? selectiveRunnerTargetATR :
+         isSpecialCapture ? specialSetupTargetATR :
+         strongLongTrend and crossStrongLong ? strongTargetATR :
+         baseTargetATR
+    float rawStop = close - atr * baseStopATR
+    float structuralCandidate = not na(recentLow) ? recentLow - atr * 0.05 : na
+    float chosenStop = not na(structuralCandidate) and structuralCandidate > rawStop and structuralCandidate < close ? structuralCandidate : rawStop
+
+    string chosenTier = "A"
+    string chosenEntryId = f_v29a_attribution_id(chosenSetup, 1)
+
+    strategy.entry(chosenEntryId, strategy.long, comment = chosenEntryId,
+         alert_message = "SOURCE MAIN | LONG QQQ | " + chosenSetup +
+              " | ENTRY " + str.tostring(close, format.mintick) +
+              " | TARGET " + str.tostring(close + atr * chosenTargetATR, format.mintick) +
+              " | SL " + str.tostring(chosenStop, format.mintick) +
+              " | TV_TS " + str.tostring(timenow))
+    v24EntriesToday += 1
+
+    tradeDirection := 1
+    entryTime := time
+    entryBar := bar_index
+    entryPrice := close
+    entryATR := atr
+    stopPrice := chosenStop
+    hardStopPrice := chosenStop
+    targetPrice := close + atr * chosenTargetATR
+    originalTarget := targetPrice
+    entryLeadScore := longLeadScore
+    tradeMFE := 0.0
+    tradeMAE := 0.0
+    expectedMinutes := isSpecialCapture ? specialSetupExpectedMinutes : isFast ? fastExpectedMinutes : pullbackExpectedMins
+    targetExtended := false
+    closingRequested := false
+    activeSetup := chosenSetup
+    activeEntryTier := "A-TIER"
+    pendingExitReason := ""
+    lastMFEBar := bar_index
+    runnerActivated := false
+    selectiveRunnerTrade := highConvictionRunner
+    diagEntryADX := adx
+    diagEntryEfficiency := efficiency
+    diagEntryRVOL := rvol
+    diagEntryATRRatio := atrRatio
+    diagEntryLead := longLeadScore
+    diagEntryLeadEdge := longLeadScore - shortLeadScore
+    diagEntryExt9ATR := longExt9Now
+    diagEntryVWAPDistATR := atr > 0 ? math.abs(close - vwap) / atr : 0.0
+    diagEntryBodyATR := signalBodyATRNow
+    diagEntryRangeATR := signalRangeATRNow
+    diagEntryFPDirectional := fpAvailable ? fpDeltaPct : na
+    diagEntryContextCount := longContextCount
+    diagEntryCrossClass := crossStrongLong ? 2 : crossMixed ? 0 : 1
+    diagEntryFPClass := fpMode == "Off" or not fpAvailable ? 0 : fpStrongBuy ? 3 : fpDeltaPct >= 0 ? 2 : 1
+    diagEntryMinuteET := currentMinuteET
+    diagEntryDOW := dayofweek
+    diagEntryMonth := month
+    diagEntryExhaustion := exhaustionCount
+    diagEntryChop := chopCondition
+    diagEntryStrongTrend := strongLongTrend
+    diagLowLossArmed := false
+    diagProfitFloorStarted := false
+    diagStrongFloorStarted := false
+    callEntryEvent := true
+    histEntryLine := entryPrice
+    histStopLine := stopPrice
+    histHardStopLine := hardStopPrice
+    histTargetLine := targetPrice
+
+    if showLabels
+        label.new(
+             bar_index, low,
+             "LONG / CALL\n" + activeSetup +
+             "\nEntry " + str.tostring(entryPrice, format.mintick) +
+             "\nTarget " + str.tostring(targetPrice, format.mintick) +
+             "\nSL " + str.tostring(stopPrice, format.mintick) +
+             "\nLead " + str.tostring(longLeadScore, "#") +
+             "\nOpp " + str.tostring(v24LongOpportunityScore, "#") + " | " + activeEntryTier,
+             style = label.style_label_up,
+             color = color.lime,
+             textcolor = color.black,
+             size = size.small
+        )
+
+else if takeShort
+    bool isFast = breakoutShort or orBreakShort or vwapReclaimShort or v24ShortCloseMomentum
+    bool isSpecialCapture = pullbackShort or vwapReclaimShort
+    string chosenSetup = v24ShortCloseMomentum ? "CLOSE MOMENTUM" : pressureContinuationShort and not shortTrigger ? "EARLY CONTINUATION" : shortSetupType
+    bool highConvictionRunner =
+         useSelectiveRunner and
+         (chosenSetup == "BREAKOUT" or chosenSetup == "OPENING BREAKOUT") and
+         shortContextCount >= 3 and atrRatio >= selectiveRunnerMinATRRatio and
+         adx >= selectiveRunnerMinADX and shortLeadScore >= selectiveRunnerMinLead and
+         (crossStrongShort or fpStrongSell)
+    float chosenTargetATR =
+         highConvictionRunner ? selectiveRunnerTargetATR :
+         isSpecialCapture ? putSpecialSetupTargetATR :
+         strongShortTrend and crossStrongShort ? strongTargetATR :
+         baseTargetATR
+    float rawStop = close + atr * baseStopATR
+    float structuralCandidate = not na(recentHigh) ? recentHigh + atr * 0.05 : na
+    float chosenStop = not na(structuralCandidate) and structuralCandidate < rawStop and structuralCandidate > close ? structuralCandidate : rawStop
+
+    string chosenTier = "A"
+    string chosenEntryId = f_v29a_attribution_id(chosenSetup, -1)
+
+    strategy.entry(chosenEntryId, strategy.short, comment = chosenEntryId,
+         alert_message = "SOURCE MAIN | SHORT QQQ | " + chosenSetup +
+              " | ENTRY " + str.tostring(close, format.mintick) +
+              " | TARGET " + str.tostring(close - atr * chosenTargetATR, format.mintick) +
+              " | SL " + str.tostring(chosenStop, format.mintick) +
+              " | TV_TS " + str.tostring(timenow))
+    v24EntriesToday += 1
+
+    tradeDirection := -1
+    entryTime := time
+    entryBar := bar_index
+    entryPrice := close
+    entryATR := atr
+    stopPrice := chosenStop
+    hardStopPrice := chosenStop
+    targetPrice := close - atr * chosenTargetATR
+    originalTarget := targetPrice
+    entryLeadScore := shortLeadScore
+    tradeMFE := 0.0
+    tradeMAE := 0.0
+    expectedMinutes := isSpecialCapture ? putSpecialExpectedMinutes : isFast ? fastExpectedMinutes : pullbackExpectedMins
+    targetExtended := false
+    closingRequested := false
+    activeSetup := chosenSetup
+    activeEntryTier := "A-TIER"
+    pendingExitReason := ""
+    lastMFEBar := bar_index
+    runnerActivated := false
+    selectiveRunnerTrade := highConvictionRunner
+    diagEntryADX := adx
+    diagEntryEfficiency := efficiency
+    diagEntryRVOL := rvol
+    diagEntryATRRatio := atrRatio
+    diagEntryLead := shortLeadScore
+    diagEntryLeadEdge := shortLeadScore - longLeadScore
+    diagEntryExt9ATR := shortExt9Now
+    diagEntryVWAPDistATR := atr > 0 ? math.abs(close - vwap) / atr : 0.0
+    diagEntryBodyATR := signalBodyATRNow
+    diagEntryRangeATR := signalRangeATRNow
+    diagEntryFPDirectional := fpAvailable ? -fpDeltaPct : na
+    diagEntryContextCount := shortContextCount
+    diagEntryCrossClass := crossStrongShort ? 2 : crossMixed ? 0 : 1
+    diagEntryFPClass := fpMode == "Off" or not fpAvailable ? 0 : fpStrongSell ? 3 : fpDeltaPct <= 0 ? 2 : 1
+    diagEntryMinuteET := currentMinuteET
+    diagEntryDOW := dayofweek
+    diagEntryMonth := month
+    diagEntryExhaustion := exhaustionCount
+    diagEntryChop := chopCondition
+    diagEntryStrongTrend := strongShortTrend
+    diagLowLossArmed := false
+    diagProfitFloorStarted := false
+    diagStrongFloorStarted := false
+    putEntryEvent := true
+    histEntryLine := entryPrice
+    histStopLine := stopPrice
+    histHardStopLine := hardStopPrice
+    histTargetLine := targetPrice
+
+    if showLabels
+        label.new(
+             bar_index, high,
+             "SHORT / PUT\n" + activeSetup +
+             "\nEntry " + str.tostring(entryPrice, format.mintick) +
+             "\nTarget " + str.tostring(targetPrice, format.mintick) +
+             "\nSL " + str.tostring(stopPrice, format.mintick) +
+             "\nLead " + str.tostring(shortLeadScore, "#") +
+             "\nOpp " + str.tostring(v24ShortOpportunityScore, "#") + " | " + activeEntryTier,
+             style = label.style_label_down,
+             color = color.red,
+             textcolor = color.white,
+             size = size.small
+        )
+
+float tradeAgeMinutes = tradeDirection != 0 and not na(entryTime) ? (time - entryTime) / 60000.0 : na
+float targetDistance = tradeDirection == 1 ? targetPrice - entryPrice : tradeDirection == -1 ? entryPrice - targetPrice : na
+float currentProgress = 0.0
+
+if tradeDirection == 1
+    float priorMFE = tradeMFE
+    if not na(entryBar) and bar_index > entryBar
+        tradeMFE := math.max(tradeMFE, high - entryPrice)
+        tradeMAE := math.max(tradeMAE, entryPrice - low)
+    else if not na(entryBar) and bar_index == entryBar and executionMode == "Live - Intrabar"
+        tradeMFE := math.max(tradeMFE, close - entryPrice)
+        tradeMAE := math.max(tradeMAE, entryPrice - close)
+    if tradeMFE > priorMFE + syminfo.mintick * 0.5
+        lastMFEBar := bar_index
+    currentProgress := f_safeDiv(close - entryPrice, targetDistance, 0.0)
+
+if tradeDirection == -1
+    float priorMFE = tradeMFE
+    if not na(entryBar) and bar_index > entryBar
+        tradeMFE := math.max(tradeMFE, entryPrice - low)
+        tradeMAE := math.max(tradeMAE, high - entryPrice)
+    else if not na(entryBar) and bar_index == entryBar and executionMode == "Live - Intrabar"
+        tradeMFE := math.max(tradeMFE, entryPrice - close)
+        tradeMAE := math.max(tradeMAE, close - entryPrice)
+    if tradeMFE > priorMFE + syminfo.mintick * 0.5
+        lastMFEBar := bar_index
+    currentProgress := f_safeDiv(entryPrice - close, targetDistance, 0.0)
+
+continuationLong =
+     tradeDirection == 1 and
+     strongLongTrend and
+     crossLongNotOpposed and
+     efficiency >= minEntryEfficiency and
+     close > ema9 and close > vwap
+
+continuationShort =
+     tradeDirection == -1 and
+     strongShortTrend and
+     crossShortNotOpposed and
+     efficiency >= minEntryEfficiency and
+     close < ema9 and close < vwap
+
+float mfeATR = tradeDirection != 0 and entryATR > 0 ? tradeMFE / entryATR : 0.0
+
+runnerQualifiesLong =
+     tradeDirection == 1 and
+     mfeATR >= runnerActivationATR and
+     adx >= runnerMinADX and
+     efficiency >= runnerMinEfficiency and
+     strongLongTrend and
+     crossStrongLong and
+     ema9 > ema21 and close > ema21 and close > vwap and
+     plusDI > minusDI
+
+runnerQualifiesShort =
+     tradeDirection == -1 and
+     mfeATR >= runnerActivationATR and
+     adx >= runnerMinADX and
+     efficiency >= runnerMinEfficiency and
+     strongShortTrend and
+     crossStrongShort and
+     ema9 < ema21 and close < ema21 and close < vwap and
+     minusDI > plusDI
+
+if not runnerActivated and (runnerQualifiesLong or runnerQualifiesShort)
+    runnerActivated := true
+
+runnerLong = runnerActivated and tradeDirection == 1
+runnerShort = runnerActivated and tradeDirection == -1
+
+if allowTargetExtension and tradeDirection == 1 and not targetExtended and currentProgress >= 0.85 and runnerLong
+    targetPrice += entryATR * targetExtensionATR
+    targetExtended := true
+    histTargetLine := targetPrice
+
+if allowTargetExtension and tradeDirection == -1 and not targetExtended and currentProgress >= 0.85 and runnerShort
+    targetPrice -= entryATR * targetExtensionATR
+    targetExtended := true
+    histTargetLine := targetPrice
+
+bool lowLossThreatLong =
+     useLowLossStop and tradeDirection == 1 and mfeATR < lowLossMaxMFEATR and
+     close < entryPrice and close < ema9 and minusDI > plusDI and
+     (close < vwap or bearDisplacement or fpStrongSell)
+
+bool lowLossThreatShort =
+     useLowLossStop and tradeDirection == -1 and mfeATR < lowLossMaxMFEATR and
+     close > entryPrice and close > ema9 and plusDI > minusDI and
+     (close > vwap or bullDisplacement or fpStrongBuy)
+
+if lowLossThreatLong and not closingRequested
+    diagLowLossArmed := true
+    stopPrice := math.max(stopPrice, entryPrice - entryATR * lowLossStopATR)
+    histStopLine := stopPrice
+
+if lowLossThreatShort and not closingRequested
+    diagLowLossArmed := true
+    stopPrice := math.min(stopPrice, entryPrice + entryATR * lowLossStopATR)
+    histStopLine := stopPrice
+
+if tradeDirection != 0 and mfeATR >= hardFloorStartMFEATR
+    diagProfitFloorStarted := true
+if tradeDirection != 0 and mfeATR >= hardFloorStrongMFEATR
+    diagStrongFloorStarted := true
+
+if tradeDirection == 1 and not closingRequested and not useProofTrail
+    float protectedStop = stopPrice
+
+    if mfeATR >= hardFloorStrongMFEATR
+        protectedStop := math.max(protectedStop, entryPrice + entryATR * hardFloorStrongLockATR)
+    else if mfeATR >= hardFloorStartMFEATR
+        protectedStop := math.max(protectedStop, entryPrice + entryATR * hardFloorStartLockATR)
+
+    if runnerLong
+        float runnerStructure = math.max(ema21 - atr * runnerStructureBufferATR, ta.lowest(low, 2) - atr * runnerStructureBufferATR)
+        protectedStop := math.max(protectedStop, runnerStructure)
+    else
+        if mfeATR >= profitLockRunnerATR
+            protectedStop := math.max(protectedStop, entryPrice + tradeMFE * lockFraction3)
+        else if mfeATR >= profitLockStrongATR
+            protectedStop := math.max(protectedStop, entryPrice + tradeMFE * lockFraction2)
+        else if mfeATR >= profitProtectTriggerATR
+            protectedStop := math.max(protectedStop, entryPrice + tradeMFE * lockFraction1)
+    protectedStop := math.min(protectedStop, close - syminfo.mintick)
+    stopPrice := math.max(stopPrice, protectedStop)
+    histStopLine := stopPrice
+
+if tradeDirection == -1 and not closingRequested and not useProofTrail
+    float protectedStop = stopPrice
+
+    if mfeATR >= hardFloorStrongMFEATR
+        protectedStop := math.min(protectedStop, entryPrice - entryATR * hardFloorStrongLockATR)
+    else if mfeATR >= hardFloorStartMFEATR
+        protectedStop := math.min(protectedStop, entryPrice - entryATR * hardFloorStartLockATR)
+
+    if runnerShort
+        float runnerStructure = math.min(ema21 + atr * runnerStructureBufferATR, ta.highest(high, 2) + atr * runnerStructureBufferATR)
+        protectedStop := math.min(protectedStop, runnerStructure)
+    else
+        if mfeATR >= profitLockRunnerATR
+            protectedStop := math.min(protectedStop, entryPrice - tradeMFE * lockFraction3)
+        else if mfeATR >= profitLockStrongATR
+            protectedStop := math.min(protectedStop, entryPrice - tradeMFE * lockFraction2)
+        else if mfeATR >= profitProtectTriggerATR
+            protectedStop := math.min(protectedStop, entryPrice - tradeMFE * lockFraction1)
+    protectedStop := math.max(protectedStop, close + syminfo.mintick)
+    stopPrice := math.min(stopPrice, protectedStop)
+    histStopLine := stopPrice
+
+float activeProofTrailOffsetATR = selectiveRunnerTrade ? selectiveRunnerTrailOffsetATR : proofTrailOffsetATR
+float activeProofTrailActivateATR = selectiveRunnerTrade ? selectiveRunnerTrailActivateATR : proofTrailActivateATR
+int proofTrailTicks = tradeDirection != 0 and not na(entryATR) ?
+     int(math.max(1.0, math.round(entryATR * activeProofTrailOffsetATR / syminfo.mintick))) : 1
+float proofTrailActivation =
+     tradeDirection == 1 ? entryPrice + entryATR * activeProofTrailActivateATR :
+     tradeDirection == -1 ? entryPrice - entryATR * activeProofTrailActivateATR : na
+
+if tradeDirection == 1 and not closingRequested
+    if useProofTrail
+        strategy.exit("CALL BRACKET", stop = stopPrice, limit = targetPrice,
+             trail_price = proofTrailActivation, trail_offset = proofTrailTicks,
+             alert_message = "SOURCE MAIN | EXIT QQQ | BRACKET | TV_TS " + str.tostring(timenow),
+             alert_profit = "SOURCE MAIN | EXIT QQQ | TARGET | TV_TS " + str.tostring(timenow),
+             alert_loss = "SOURCE MAIN | EXIT QQQ | STOP | TV_TS " + str.tostring(timenow),
+             alert_trailing = "SOURCE MAIN | EXIT QQQ | TRAIL | TV_TS " + str.tostring(timenow))
+    else
+        strategy.exit("CALL BRACKET", stop = stopPrice, limit = targetPrice,
+             alert_message = "SOURCE MAIN | EXIT QQQ | BRACKET | TV_TS " + str.tostring(timenow),
+             alert_profit = "SOURCE MAIN | EXIT QQQ | TARGET | TV_TS " + str.tostring(timenow),
+             alert_loss = "SOURCE MAIN | EXIT QQQ | STOP | TV_TS " + str.tostring(timenow))
+
+if tradeDirection == -1 and not closingRequested
+    if useProofTrail
+        strategy.exit("PUT BRACKET", stop = stopPrice, limit = targetPrice,
+             trail_price = proofTrailActivation, trail_offset = proofTrailTicks,
+             alert_message = "SOURCE MAIN | EXIT QQQ | BRACKET | TV_TS " + str.tostring(timenow),
+             alert_profit = "SOURCE MAIN | EXIT QQQ | TARGET | TV_TS " + str.tostring(timenow),
+             alert_loss = "SOURCE MAIN | EXIT QQQ | STOP | TV_TS " + str.tostring(timenow),
+             alert_trailing = "SOURCE MAIN | EXIT QQQ | TRAIL | TV_TS " + str.tostring(timenow))
+    else
+        strategy.exit("PUT BRACKET", stop = stopPrice, limit = targetPrice,
+             alert_message = "SOURCE MAIN | EXIT QQQ | BRACKET | TV_TS " + str.tostring(timenow),
+             alert_profit = "SOURCE MAIN | EXIT QQQ | TARGET | TV_TS " + str.tostring(timenow),
+             alert_loss = "SOURCE MAIN | EXIT QQQ | STOP | TV_TS " + str.tostring(timenow))
+
+if tradeDirection == 1 and pendingExitReason == ""
+    if low <= stopPrice and high >= targetPrice
+        pendingExitReason := "STOP / TARGET SAME BAR"
+    else if low <= stopPrice
+        pendingExitReason := "STOP"
+    else if high >= targetPrice
+        pendingExitReason := "TARGET"
+
+if tradeDirection == -1 and pendingExitReason == ""
+    if high >= stopPrice and low <= targetPrice
+        pendingExitReason := "STOP / TARGET SAME BAR"
+    else if high >= stopPrice
+        pendingExitReason := "STOP"
+    else if low <= targetPrice
+        pendingExitReason := "TARGET"
+
+barsSinceMFE = tradeDirection != 0 and not na(lastMFEBar) ? bar_index - lastMFEBar : 0
+
+float currentDirectionalProfit =
+     tradeDirection == 1 ? close - entryPrice :
+     tradeDirection == -1 ? entryPrice - close : 0.0
+float peakGivebackPct = tradeMFE > syminfo.mintick ? math.max(0.0, (tradeMFE - currentDirectionalProfit) / tradeMFE) : 0.0
+float allowedGivebackPct =
+     mfeATR >= peakGivebackRunnerATR ? maxGivebackRunnerPct :
+     mfeATR >= peakGivebackMidATR ? maxGivebackMidPct :
+     maxGivebackEarlyPct
+
+bool oppositeThreatLong =
+     tradeDirection == 1 and
+     shortLeadScore >= exitThreatScore and
+     shortLeadScore >= longLeadScore + exitThreatEdge
+
+bool oppositeThreatShort =
+     tradeDirection == -1 and
+     longLeadScore >= exitThreatScore and
+     longLeadScore >= shortLeadScore + exitThreatEdge
+
+bool reversalBankLong =
+     tradeDirection == 1 and
+     currentDirectionalProfit > 0 and
+     mfeATR >= reversalBankMinMFEATR and
+     oppositeThreatLong and
+     (bearishRejection or bearDisplacement or fpStrongSell or close < ema9)
+
+bool reversalBankShort =
+     tradeDirection == -1 and
+     currentDirectionalProfit > 0 and
+     mfeATR >= reversalBankMinMFEATR and
+     oppositeThreatShort and
+     (bullishRejection or bullDisplacement or fpStrongBuy or close > ema9)
+
+float structureHealth =
+     tradeDirection == 1 ? ((ema9 >= ema21 or close >= vwap) ? 20.0 : 0.0) :
+     tradeDirection == -1 ? ((ema9 <= ema21 or close <= vwap) ? 20.0 : 0.0) : 0.0
+
+float levelHealth =
+     tradeDirection == 1 ? (close >= entryPrice ? 20.0 : close >= stopPrice ? 10.0 : 0.0) :
+     tradeDirection == -1 ? (close <= entryPrice ? 20.0 : close <= stopPrice ? 10.0 : 0.0) : 0.0
+
+float flowHealth =
+     tradeDirection == 1 ? (fpStrongSell ? 0.0 : minusDI > plusDI ? 8.0 : fpStrongBuy ? 20.0 : 15.0) :
+     tradeDirection == -1 ? (fpStrongBuy ? 0.0 : plusDI > minusDI ? 8.0 : fpStrongSell ? 20.0 : 15.0) : 0.0
+
+float momentumHealth =
+     tradeDirection == 1 ? (bearDisplacement ? 0.0 : close < ema9 ? 8.0 : efficiency >= minEntryEfficiency ? 20.0 : 12.0) :
+     tradeDirection == -1 ? (bullDisplacement ? 0.0 : close > ema9 ? 8.0 : efficiency >= minEntryEfficiency ? 20.0 : 12.0) : 0.0
+
+float progressHealth =
+     tradeDirection == 0 ? 0.0 :
+     currentDirectionalProfit > 0 ? 20.0 :
+     not na(tradeAgeMinutes) and tradeAgeMinutes >= staleCheckMinutes and tradeMFE < entryATR * staleProgressATR ? 4.0 : 12.0
+
+float tradeHealth = math.max(0.0, math.min(100.0, structureHealth + levelHealth + flowHealth + momentumHealth + progressHealth))
+
+bool healthBankLong =
+     useTradeHealthExit and tradeDirection == 1 and
+     currentDirectionalProfit > 0 and mfeATR >= reversalBankMinMFEATR and
+     tradeHealth <= healthExitLevel and
+     (oppositeThreatLong or bearDisplacement or fpStrongSell)
+
+bool healthBankShort =
+     useTradeHealthExit and tradeDirection == -1 and
+     currentDirectionalProfit > 0 and mfeATR >= reversalBankMinMFEATR and
+     tradeHealth <= healthExitLevel and
+     (oppositeThreatShort or bullDisplacement or fpStrongBuy)
+
+fastImpulseLong =
+     tradeDirection == 1 and
+     not na(tradeAgeMinutes) and tradeAgeMinutes <= impulseWindowMinutes and
+     mfeATR >= impulseActivationATR
+
+fastImpulseShort =
+     tradeDirection == -1 and
+     not na(tradeAgeMinutes) and tradeAgeMinutes <= impulseWindowMinutes and
+     mfeATR >= impulseActivationATR
+
+impulseBankLong =
+     fastImpulseLong and
+     currentDirectionalProfit > 0 and
+     peakGivebackPct >= impulseGivebackPct and
+     close < open and close < ema9
+
+impulseBankShort =
+     fastImpulseShort and
+     currentDirectionalProfit > 0 and
+     peakGivebackPct >= impulseGivebackPct and
+     close > open and close > ema9
+
+runnerExhaustLong =
+     runnerLong and
+     currentDirectionalProfit > 0 and
+     barsSinceMFE >= 1 and
+     peakGivebackPct >= runnerMaxGivebackPct and
+     close < ema9 and
+     (efficiency < runnerMinEfficiency or minusDI >= plusDI)
+
+runnerExhaustShort =
+     runnerShort and
+     currentDirectionalProfit > 0 and
+     barsSinceMFE >= 1 and
+     peakGivebackPct >= runnerMaxGivebackPct and
+     close > ema9 and
+     (efficiency < runnerMinEfficiency or plusDI >= minusDI)
+
+peakGivebackExit =
+     tradeDirection != 0 and
+     not runnerActivated and
+     mfeATR >= peakGivebackStartATR and
+     currentDirectionalProfit > 0 and
+     peakGivebackPct >= allowedGivebackPct and
+     not ((continuationLong or continuationShort) and peakGivebackPct < allowedGivebackPct + 0.10)
+
+profitStallLong =
+     tradeDirection == 1 and
+     not runnerLong and
+     mfeATR >= stallExitMinMFEATR and
+     barsSinceMFE >= stallBarsAfterProfit and
+     currentDirectionalProfit > 0 and
+     not continuationLong and
+     (close < ema9 or efficiency < minEntryEfficiency or peakGivebackPct >= 0.30)
+
+profitStallShort =
+     tradeDirection == -1 and
+     not runnerShort and
+     mfeATR >= stallExitMinMFEATR and
+     barsSinceMFE >= stallBarsAfterProfit and
+     currentDirectionalProfit > 0 and
+     not continuationShort and
+     (close > ema9 or efficiency < minEntryEfficiency or peakGivebackPct >= 0.30)
+
+int failureVotesLong =
+     (close < ema9 ? 1 : 0) +
+     (close < vwap ? 1 : 0) +
+     (close < ema21 ? 1 : 0) +
+     (minusDI > plusDI ? 1 : 0) +
+     (fpStrongSell ? 1 : 0) +
+     (crossStrongShort ? 1 : 0) +
+     ((bearDisplacement or bearishRejection or shortLeadScore >= longLeadScore + failureCutLeadEdge) ? 1 : 0)
+
+int failureVotesShort =
+     (close > ema9 ? 1 : 0) +
+     (close > vwap ? 1 : 0) +
+     (close > ema21 ? 1 : 0) +
+     (plusDI > minusDI ? 1 : 0) +
+     (fpStrongBuy ? 1 : 0) +
+     (crossStrongLong ? 1 : 0) +
+     ((bullDisplacement or bullishRejection or longLeadScore >= shortLeadScore + failureCutLeadEdge) ? 1 : 0)
+
+float currentAdverseATR =
+     tradeDirection == 1 ? math.max(0.0, entryPrice - close) / math.max(entryATR, syminfo.mintick) :
+     tradeDirection == -1 ? math.max(0.0, close - entryPrice) / math.max(entryATR, syminfo.mintick) : 0.0
+
+bool selectiveFailureCutLong =
+     useFailureCut and tradeDirection == 1 and
+     not na(tradeAgeMinutes) and
+     tradeAgeMinutes >= failureCutGraceMinutes and tradeAgeMinutes <= failureCutMaxMinutes and
+     currentDirectionalProfit < 0 and
+     currentAdverseATR >= failureCutMinAdverseATR and
+     mfeATR <= failureCutMaxMFEATR and
+     close < ema9 and minusDI > plusDI and
+     failureVotesLong >= failureCutMinVotes
+
+bool selectiveFailureCutShort =
+     useFailureCut and tradeDirection == -1 and
+     not na(tradeAgeMinutes) and
+     tradeAgeMinutes >= failureCutGraceMinutes and tradeAgeMinutes <= failureCutMaxMinutes and
+     currentDirectionalProfit < 0 and
+     currentAdverseATR >= failureCutMinAdverseATR and
+     mfeATR <= failureCutMaxMFEATR and
+     close > ema9 and plusDI > minusDI and
+     failureVotesShort >= failureCutMinVotes
+
+fastFailureLong =
+     tradeDirection == 1 and
+     not na(tradeAgeMinutes) and
+     tradeAgeMinutes <= fastFailureMinutes and
+     tradeMAE >= entryATR * fastFailureMAEATR and
+     tradeMFE < entryATR * profitProtectTriggerATR and
+     close < ema21 and close < vwap
+
+fastFailureShort =
+     tradeDirection == -1 and
+     not na(tradeAgeMinutes) and
+     tradeAgeMinutes <= fastFailureMinutes and
+     tradeMAE >= entryATR * fastFailureMAEATR and
+     tradeMFE < entryATR * profitProtectTriggerATR and
+     close > ema21 and close > vwap
+
+staleTrade =
+     tradeDirection != 0 and
+     not runnerActivated and
+     not na(tradeAgeMinutes) and
+     tradeAgeMinutes >= staleCheckMinutes and
+     tradeMFE < entryATR * staleProgressATR and
+     (chopCondition or efficiency < chopEfficiency)
+
+expectedWindowFailed =
+     tradeDirection != 0 and
+     not na(tradeAgeMinutes) and
+     tradeAgeMinutes >= expectedMinutes and
+     currentProgress < 0.45 and
+     not (continuationLong or continuationShort)
+
+longThesisBroken =
+     tradeDirection == 1 and
+     close < vwap and ema9 < ema21 and minusDI > plusDI
+
+shortThesisBroken =
+     tradeDirection == -1 and
+     close > vwap and ema9 > ema21 and plusDI > minusDI
+
+absoluteTimeExit =
+     tradeDirection != 0 and
+     not na(tradeAgeMinutes) and
+     tradeAgeMinutes >= maxTradeMinutes
+
+adaptiveSessionExit =
+     tradeDirection != 0 and
+     inStopEval and
+     sessionExhaustedPersistent and
+     tradeAgeMinutes >= staleCheckMinutes
+
+hardTimeExit = tradeDirection != 0 and inHardStop
+
+customExit =
+     tradeDirection != 0 and
+     not closingRequested and
+     (reversalBankLong or reversalBankShort or
+      healthBankLong or healthBankShort or
+      impulseBankLong or impulseBankShort or
+      runnerExhaustLong or runnerExhaustShort or
+      peakGivebackExit or
+      profitStallLong or profitStallShort or
+      selectiveFailureCutLong or selectiveFailureCutShort or
+      fastFailureLong or fastFailureShort or
+      staleTrade or expectedWindowFailed or
+      longThesisBroken or shortThesisBroken or
+      absoluteTimeExit or adaptiveSessionExit or hardTimeExit)
+
+if customExit
+    if selectiveFailureCutLong or selectiveFailureCutShort
+        diagSelectiveFailureCuts += 1
+    pendingExitReason :=
+         hardTimeExit ? "HARD SESSION STOP" :
+         adaptiveSessionExit ? "SESSION EDGE GONE" :
+         (reversalBankLong or reversalBankShort) ? "REVERSAL DEVELOPING / BANK PROFIT" :
+         (healthBankLong or healthBankShort) ? "TRADE HEALTH WEAK / BANK PROFIT" :
+         (impulseBankLong or impulseBankShort) ? "FAST IMPULSE / BANK MOVE" :
+         (runnerExhaustLong or runnerExhaustShort) ? "RUNNER EXHAUSTED" :
+         peakGivebackExit ? "PEAK GIVEBACK / BANK MOVE" :
+         (profitStallLong or profitStallShort) ? "MOVE STALLED / TAKE PROFIT" :
+         (selectiveFailureCutLong or selectiveFailureCutShort) ? "SELECTIVE FAILURE CUT" :
+         (fastFailureLong or fastFailureShort) ? "FAST FAILURE" :
+         staleTrade ? "NO MOVE / CHOP" :
+         expectedWindowFailed ? "MOVE TOO SLOW" :
+         absoluteTimeExit ? "MAX TIME" :
+         "DIRECTION FLIPPED"
+
+    strategy.close_all(alert_message = "SOURCE MAIN | EXIT QQQ | " + pendingExitReason + " | TV_TS " + str.tostring(timenow), immediately = true)
+
+    closingRequested := true
+
+if newClosedTrade and tradeDirection != 0
+    researchTrades += 1
+    bool dirHit = tradeMFE >= entryATR * directionHitATR
+    researchDirHits += dirHit ? 1 : 0
+    totalDurationMinutes += nz(tradeAgeMinutes, 0)
+
+    int closedIdx = strategy.closedtrades - 1
+    float realizedExit = strategy.closedtrades.exit_price(closedIdx)
+    float realizedDirectionalMove = tradeDirection == 1 ? realizedExit - entryPrice : entryPrice - realizedExit
+    bool realizedWinner = realizedDirectionalMove > 0
+    float cashProfit = strategy.closedtrades.profit(closedIdx)
+    float cashWin = math.max(cashProfit, 0.0)
+    float cashLoss = math.max(-cashProfit, 0.0)
+
+    if tradeDirection == 1
+        diagCallTrades += 1
+        diagCallWins += realizedWinner ? 1 : 0
+        diagCallGP += cashWin
+        diagCallGL += cashLoss
+    else
+        diagPutTrades += 1
+        diagPutWins += realizedWinner ? 1 : 0
+        diagPutGP += cashWin
+        diagPutGL += cashLoss
+
+    int tierIdx = 0
+    f_diagAdd(diagTierT, diagTierW, diagTierGP, diagTierGL, tierIdx, realizedWinner, cashWin, cashLoss)
+
+    if activeSetup == "OPENING BREAKOUT"
+        diagORTrades += 1
+        diagORWins += realizedWinner ? 1 : 0
+        diagORGP += cashWin
+        diagORGL += cashLoss
+    else if activeSetup == "BREAKOUT"
+        diagBOTrades += 1
+        diagBOWins += realizedWinner ? 1 : 0
+        diagBOGP += cashWin
+        diagBOGL += cashLoss
+    else if activeSetup == "LIQUIDITY REVERSAL"
+        diagLiqTrades += 1
+        diagLiqWins += realizedWinner ? 1 : 0
+        diagLiqGP += cashWin
+        diagLiqGL += cashLoss
+    else if activeSetup == "EMA PULLBACK"
+        diagEMATrades += 1
+        diagEMAWins += realizedWinner ? 1 : 0
+        diagEMAGP += cashWin
+        diagEMAGL += cashLoss
+    else if activeSetup == "VWAP RECLAIM"
+        diagVWAPTrades += 1
+        diagVWAPWins += realizedWinner ? 1 : 0
+        diagVWAPGP += cashWin
+        diagVWAPGL += cashLoss
+    else if activeSetup == "EARLY CONTINUATION"
+        diagEarlyTrades += 1
+        diagEarlyWins += realizedWinner ? 1 : 0
+        diagEarlyGP += cashWin
+        diagEarlyGL += cashLoss
+
+    float capturePct = tradeMFE > syminfo.mintick ? math.max(0.0, math.min(100.0, realizedDirectionalMove / tradeMFE * 100.0)) : 0.0
+    float givebackPct = tradeMFE > syminfo.mintick ? math.max(0.0, math.min(100.0, (tradeMFE - realizedDirectionalMove) / tradeMFE * 100.0)) : 0.0
+    totalCapturePct += capturePct
+    if realizedWinner
+        researchWinners += 1
+        winnerCapturePctTotal += capturePct
+        if tradeDirection == 1
+            diagCallWinnerCaptureTotal += capturePct
+        else
+            diagPutWinnerCaptureTotal += capturePct
+    if dirHit
+        dirHitWins += realizedWinner ? 1 : 0
+        dirHitLosses += realizedWinner ? 0 : 1
+        dirHitGivebackPctTotal += givebackPct
+
+    float mfeATRClosed = entryATR > 0 ? tradeMFE / entryATR : 0.0
+    float maeATRClosed = entryATR > 0 ? tradeMAE / entryATR : 0.0
+    float realizedRClosed = entryATR > 0 ? realizedDirectionalMove / entryATR : 0.0
+    float durationClosed = nz(tradeAgeMinutes, 0.0)
+
+    diagTotalMFEATR += mfeATRClosed
+    diagTotalMAEATR += maeATRClosed
+    diagTotalRealizedR += realizedRClosed
+    if realizedWinner
+        diagWinnerMFEATR += mfeATRClosed
+        diagWinnerMAEATR += maeATRClosed
+        diagWinnerRealizedR += realizedRClosed
+        diagWinnerDuration += durationClosed
+        diagWinnerCaptureUnder25 += capturePct < 25 ? 1 : 0
+        diagWinnerCaptureUnder50 += capturePct < 50 ? 1 : 0
+        diagWinnerCaptureOver75 += capturePct >= 75 ? 1 : 0
+    else
+        diagLosers += 1
+        diagLoserMFEATR += mfeATRClosed
+        diagLoserMAEATR += maeATRClosed
+        diagLoserRealizedR += realizedRClosed
+        diagLoserDuration += durationClosed
+        diagLossAfterMFE15 += mfeATRClosed >= 0.15 ? 1 : 0
+        diagLossAfterMFE30 += mfeATRClosed >= 0.30 ? 1 : 0
+        diagLossAfterMFE50 += mfeATRClosed >= 0.50 ? 1 : 0
+        if tradeDirection == 1
+            diagCallLossAfterMFE30 += mfeATRClosed >= 0.30 ? 1 : 0
+            diagCallLossAfterMFE50 += mfeATRClosed >= 0.50 ? 1 : 0
+        else
+            diagPutLossAfterMFE30 += mfeATRClosed >= 0.30 ? 1 : 0
+            diagPutLossAfterMFE50 += mfeATRClosed >= 0.50 ? 1 : 0
+        diagLossAfterMFE75 += mfeATRClosed >= 0.75 ? 1 : 0
+        diagLossAfterMFE100 += mfeATRClosed >= 1.00 ? 1 : 0
+
+    int setupIdx = f_setupIndex(activeSetup)
+    if setupIdx >= 0
+        int setupSideIdx = setupIdx + (tradeDirection == -1 ? 6 : 0)
+        f_diagAdd(diagSetupSideT, diagSetupSideW, diagSetupSideGP, diagSetupSideGL, setupSideIdx, realizedWinner, cashWin, cashLoss)
+
+    int dayIdx =
+         diagEntryDOW == dayofweek.monday ? 0 :
+         diagEntryDOW == dayofweek.tuesday ? 1 :
+         diagEntryDOW == dayofweek.wednesday ? 2 :
+         diagEntryDOW == dayofweek.thursday ? 3 :
+         diagEntryDOW == dayofweek.friday ? 4 : -1
+    f_diagAdd(diagDayT, diagDayW, diagDayGP, diagDayGL, dayIdx, realizedWinner, cashWin, cashLoss)
+
+    int timeIdx =
+         na(diagEntryMinuteET) ? -1 :
+         diagEntryMinuteET < 600 ? 0 :
+         diagEntryMinuteET < 660 ? 1 :
+         diagEntryMinuteET < 720 ? 2 :
+         diagEntryMinuteET < 780 ? 3 :
+         diagEntryMinuteET < 840 ? 4 :
+         diagEntryMinuteET < 900 ? 5 : 6
+    f_diagAdd(diagTimeT, diagTimeW, diagTimeGP, diagTimeGL, timeIdx, realizedWinner, cashWin, cashLoss)
+    int sideTimeIdx = timeIdx >= 0 ? timeIdx + (tradeDirection == -1 ? 7 : 0) : -1
+    f_diagAdd(diagSideTimeT, diagSideTimeW, diagSideTimeGP, diagSideTimeGL, sideTimeIdx, realizedWinner, cashWin, cashLoss)
+    f_diagAdd(diagMonthT, diagMonthW, diagMonthGP, diagMonthGL, na(diagEntryMonth) ? -1 : diagEntryMonth - 1, realizedWinner, cashWin, cashLoss)
+
+    int adxIdx = na(diagEntryADX) ? -1 : diagEntryADX < 18 ? 0 : diagEntryADX < 23 ? 1 : diagEntryADX < 30 ? 2 : 3
+    int effIdx = na(diagEntryEfficiency) ? -1 : diagEntryEfficiency < 0.27 ? 0 : diagEntryEfficiency < 0.40 ? 1 : diagEntryEfficiency < 0.55 ? 2 : 3
+    int rvolIdx = na(diagEntryRVOL) ? -1 : diagEntryRVOL < 0.80 ? 0 : diagEntryRVOL < 1.00 ? 1 : diagEntryRVOL < 1.30 ? 2 : 3
+    int atrIdx = na(diagEntryATRRatio) ? -1 : diagEntryATRRatio < 0.80 ? 0 : diagEntryATRRatio < 1.00 ? 1 : diagEntryATRRatio < 1.20 ? 2 : 3
+    int leadIdx = na(diagEntryLead) ? -1 : diagEntryLead < 60 ? 0 : diagEntryLead < 70 ? 1 : diagEntryLead < 80 ? 2 : 3
+    int leadEdgeIdx = na(diagEntryLeadEdge) ? -1 : diagEntryLeadEdge < 8 ? 0 : diagEntryLeadEdge < 15 ? 1 : diagEntryLeadEdge < 25 ? 2 : 3
+    int contextIdx = na(diagEntryContextCount) ? -1 : diagEntryContextCount >= 3 ? 1 : 0
+    int extIdx = na(diagEntryExt9ATR) ? -1 : diagEntryExt9ATR < 0.25 ? 0 : diagEntryExt9ATR < 0.50 ? 1 : diagEntryExt9ATR < 0.80 ? 2 : 3
+    int vwapDistIdx = na(diagEntryVWAPDistATR) ? -1 : diagEntryVWAPDistATR < 0.15 ? 0 : diagEntryVWAPDistATR < 0.30 ? 1 : diagEntryVWAPDistATR < 0.60 ? 2 : 3
+    int bodyIdx = na(diagEntryBodyATR) ? -1 : diagEntryBodyATR < 0.25 ? 0 : diagEntryBodyATR < 0.40 ? 1 : diagEntryBodyATR < 0.65 ? 2 : 3
+    int rangeIdx = na(diagEntryRangeATR) ? -1 : diagEntryRangeATR < 0.50 ? 0 : diagEntryRangeATR < 0.80 ? 1 : diagEntryRangeATR < 1.20 ? 2 : 3
+    int stateIdx = diagEntryChop ? 0 : diagEntryStrongTrend ? 2 : 1
+    int exhaustIdx = na(diagEntryExhaustion) ? -1 : diagEntryExhaustion <= 1 ? 0 : diagEntryExhaustion <= 3 ? 1 : 2
+
+    f_diagAdd(diagADXT, diagADXW, diagADXGP, diagADXGL, adxIdx, realizedWinner, cashWin, cashLoss)
+    f_diagAdd(diagEffT, diagEffW, diagEffGP, diagEffGL, effIdx, realizedWinner, cashWin, cashLoss)
+    f_diagAdd(diagRVOLT, diagRVOLW, diagRVOLGP, diagRVOLGL, rvolIdx, realizedWinner, cashWin, cashLoss)
+    f_diagAdd(diagATRT, diagATRW, diagATRGP, diagATRGL, atrIdx, realizedWinner, cashWin, cashLoss)
+    f_diagAdd(diagLeadT, diagLeadW, diagLeadGP, diagLeadGL, leadIdx, realizedWinner, cashWin, cashLoss)
+    f_diagAdd(diagLeadEdgeT, diagLeadEdgeW, diagLeadEdgeGP, diagLeadEdgeGL, leadEdgeIdx, realizedWinner, cashWin, cashLoss)
+    f_diagAdd(diagCrossT, diagCrossW, diagCrossGP, diagCrossGL, nz(diagEntryCrossClass, -1), realizedWinner, cashWin, cashLoss)
+    f_diagAdd(diagFPT, diagFPW, diagFPGP, diagFPGL, nz(diagEntryFPClass, -1), realizedWinner, cashWin, cashLoss)
+    f_diagAdd(diagContextT, diagContextW, diagContextGP, diagContextGL, contextIdx, realizedWinner, cashWin, cashLoss)
+    f_diagAdd(diagExtT, diagExtW, diagExtGP, diagExtGL, extIdx, realizedWinner, cashWin, cashLoss)
+    f_diagAdd(diagVWAPDistT, diagVWAPDistW, diagVWAPDistGP, diagVWAPDistGL, vwapDistIdx, realizedWinner, cashWin, cashLoss)
+    f_diagAdd(diagBodyT, diagBodyW, diagBodyGP, diagBodyGL, bodyIdx, realizedWinner, cashWin, cashLoss)
+    f_diagAdd(diagRangeT, diagRangeW, diagRangeGP, diagRangeGL, rangeIdx, realizedWinner, cashWin, cashLoss)
+    f_diagAdd(diagStateT, diagStateW, diagStateGP, diagStateGL, stateIdx, realizedWinner, cashWin, cashLoss)
+    f_diagAdd(diagExhaustT, diagExhaustW, diagExhaustGP, diagExhaustGL, exhaustIdx, realizedWinner, cashWin, cashLoss)
+
+    if mfeATRClosed >= 0.15
+        f_diagAdd(diagMFET, diagMFEW, diagMFEGP, diagMFEGL, 0, realizedWinner, cashWin, cashLoss)
+    if mfeATRClosed >= 0.30
+        f_diagAdd(diagMFET, diagMFEW, diagMFEGP, diagMFEGL, 1, realizedWinner, cashWin, cashLoss)
+    if mfeATRClosed >= 0.50
+        f_diagAdd(diagMFET, diagMFEW, diagMFEGP, diagMFEGL, 2, realizedWinner, cashWin, cashLoss)
+    if mfeATRClosed >= 0.75
+        f_diagAdd(diagMFET, diagMFEW, diagMFEGP, diagMFEGL, 3, realizedWinner, cashWin, cashLoss)
+    if mfeATRClosed >= 1.00
+        f_diagAdd(diagMFET, diagMFEW, diagMFEGP, diagMFEGL, 4, realizedWinner, cashWin, cashLoss)
+
+    int sideMFEBase = tradeDirection == -1 ? 5 : 0
+    if mfeATRClosed >= 0.15
+        f_diagAdd(diagSideMFET, diagSideMFEW, diagSideMFEGP, diagSideMFEGL, sideMFEBase + 0, realizedWinner, cashWin, cashLoss)
+    if mfeATRClosed >= 0.30
+        f_diagAdd(diagSideMFET, diagSideMFEW, diagSideMFEGP, diagSideMFEGL, sideMFEBase + 1, realizedWinner, cashWin, cashLoss)
+    if mfeATRClosed >= 0.50
+        f_diagAdd(diagSideMFET, diagSideMFEW, diagSideMFEGP, diagSideMFEGL, sideMFEBase + 2, realizedWinner, cashWin, cashLoss)
+    if mfeATRClosed >= 0.75
+        f_diagAdd(diagSideMFET, diagSideMFEW, diagSideMFEGP, diagSideMFEGL, sideMFEBase + 3, realizedWinner, cashWin, cashLoss)
+    if mfeATRClosed >= 1.00
+        f_diagAdd(diagSideMFET, diagSideMFEW, diagSideMFEGP, diagSideMFEGL, sideMFEBase + 4, realizedWinner, cashWin, cashLoss)
+
+    int maeIdx = maeATRClosed < 0.15 ? 0 : maeATRClosed < 0.30 ? 1 : maeATRClosed < 0.50 ? 2 : 3
+    int durationIdx = durationClosed < 5 ? 0 : durationClosed < 10 ? 1 : durationClosed < 20 ? 2 : 3
+    f_diagAdd(diagMAET, diagMAEW, diagMAEGP, diagMAEGL, maeIdx, realizedWinner, cashWin, cashLoss)
+    f_diagAdd(diagDurationT, diagDurationW, diagDurationGP, diagDurationGL, durationIdx, realizedWinner, cashWin, cashLoss)
+
+    if diagLowLossArmed
+        f_diagAdd(diagMgmtT, diagMgmtW, diagMgmtGP, diagMgmtGL, 0, realizedWinner, cashWin, cashLoss)
+    if diagProfitFloorStarted
+        f_diagAdd(diagMgmtT, diagMgmtW, diagMgmtGP, diagMgmtGL, 1, realizedWinner, cashWin, cashLoss)
+    if diagStrongFloorStarted
+        f_diagAdd(diagMgmtT, diagMgmtW, diagMgmtGP, diagMgmtGL, 2, realizedWinner, cashWin, cashLoss)
+    if runnerActivated
+        f_diagAdd(diagMgmtT, diagMgmtW, diagMgmtGP, diagMgmtGL, 3, realizedWinner, cashWin, cashLoss)
+    if targetExtended
+        f_diagAdd(diagMgmtT, diagMgmtW, diagMgmtGP, diagMgmtGL, 4, realizedWinner, cashWin, cashLoss)
+
+    int exitIdx = 15
+    if pendingExitReason == "TARGET"
+        exitIdx := 0
+    else if pendingExitReason == "STOP / TARGET SAME BAR"
+        exitIdx := 15
+    else if pendingExitReason == "STOP"
+        bool positiveStop = tradeDirection == 1 ? stopPrice > entryPrice + syminfo.mintick * 0.5 : stopPrice < entryPrice - syminfo.mintick * 0.5
+        bool tightenedStop = tradeDirection == 1 ? stopPrice > hardStopPrice + syminfo.mintick * 0.5 : stopPrice < hardStopPrice - syminfo.mintick * 0.5
+        exitIdx := positiveStop ? 3 : tightenedStop ? 2 : 1
+    else if pendingExitReason == "REVERSAL DEVELOPING / BANK PROFIT"
+        exitIdx := 4
+    else if pendingExitReason == "TRADE HEALTH WEAK / BANK PROFIT"
+        exitIdx := 5
+    else if pendingExitReason == "FAST IMPULSE / BANK MOVE"
+        exitIdx := 6
+    else if pendingExitReason == "RUNNER EXHAUSTED"
+        exitIdx := 7
+    else if pendingExitReason == "PEAK GIVEBACK / BANK MOVE"
+        exitIdx := 8
+    else if pendingExitReason == "MOVE STALLED / TAKE PROFIT"
+        exitIdx := 9
+    else if pendingExitReason == "FAST FAILURE"
+        exitIdx := 10
+    else if pendingExitReason == "NO MOVE / CHOP"
+        exitIdx := 11
+    else if pendingExitReason == "MOVE TOO SLOW"
+        exitIdx := 12
+    else if pendingExitReason == "DIRECTION FLIPPED"
+        exitIdx := 13
+    else if pendingExitReason == "HARD SESSION STOP" or pendingExitReason == "SESSION EDGE GONE" or pendingExitReason == "MAX TIME"
+        exitIdx := 14
+    f_diagAdd(diagExitT, diagExitW, diagExitGP, diagExitGL, exitIdx, realizedWinner, cashWin, cashLoss)
+
+    bool sameBarAmbiguous = pendingExitReason == "STOP / TARGET SAME BAR"
+    if sameBarAmbiguous
+        ambiguousSameBarTrades += 1
+    else
+        cleanTrades += 1
+        cleanWins += realizedWinner ? 1 : 0
+
+    if realizedWinner and mfeATR >= profitProtectTriggerATR
+        reentryBlockedDirection := tradeDirection
+        reentryBlockBar := bar_index
+
+    lastExitBar := bar_index
+    exitEvent := true
+
+    string resultText = dirHit ? "DIR HIT" : "DIR MISS"
+    string reasonText = pendingExitReason == "" ? "CLOSED" : pendingExitReason
+    string outcomeText = realizedWinner ? "WIN" : realizedDirectionalMove < 0 ? "LOSS" : "FLAT"
+
+    if showLabels
+        label.new(
+             bar_index,
+             tradeDirection == 1 ? high : low,
+             outcomeText + " / EXIT " + (tradeDirection == 1 ? "LONG" : "SHORT") +
+             "\n" + reasonText +
+             "\nExit " + str.tostring(realizedExit, format.mintick) +
+             "\nMove " + str.tostring(realizedDirectionalMove, "#.##") +
+             "\n" + resultText,
+             style = tradeDirection == 1 ? label.style_label_down : label.style_label_up,
+             color = realizedWinner ? color.lime : realizedDirectionalMove < 0 ? color.red : color.orange,
+             textcolor = realizedWinner ? color.black : color.white,
+             size = size.small
+        )
+
+    tradeDirection := 0
+    entryTime := na
+    entryBar := na
+    entryPrice := na
+    entryATR := na
+    stopPrice := na
+    hardStopPrice := na
+    targetPrice := na
+    originalTarget := na
+    entryLeadScore := na
+    tradeMFE := 0.0
+    tradeMAE := 0.0
+    expectedMinutes := na
+    targetExtended := false
+    closingRequested := false
+    activeSetup := ""
+    activeEntryTier := ""
+    pendingExitReason := ""
+    lastMFEBar := na
+    runnerActivated := false
+    selectiveRunnerTrade := false
+    diagEntryADX := na
+    diagEntryEfficiency := na
+    diagEntryRVOL := na
+    diagEntryATRRatio := na
+    diagEntryLead := na
+    diagEntryLeadEdge := na
+    diagEntryExt9ATR := na
+    diagEntryVWAPDistATR := na
+    diagEntryBodyATR := na
+    diagEntryRangeATR := na
+    diagEntryFPDirectional := na
+    diagEntryContextCount := na
+    diagEntryCrossClass := na
+    diagEntryFPClass := na
+    diagEntryMinuteET := na
+    diagEntryDOW := na
+    diagEntryMonth := na
+    diagEntryExhaustion := na
+    diagEntryChop := false
+    diagEntryStrongTrend := false
+    diagLowLossArmed := false
+    diagProfitFloorStarted := false
+    diagStrongFloorStarted := false
+
+if orphanTradeState
+    tradeDirection := 0
+    entryTime := na
+    entryBar := na
+    entryPrice := na
+    entryATR := na
+    stopPrice := na
+    hardStopPrice := na
+    targetPrice := na
+    originalTarget := na
+    entryLeadScore := na
+    tradeMFE := 0.0
+    tradeMAE := 0.0
+    expectedMinutes := na
+    targetExtended := false
+    closingRequested := false
+    activeSetup := ""
+    activeEntryTier := ""
+    pendingExitReason := ""
+    lastMFEBar := na
+    runnerActivated := false
+    selectiveRunnerTrade := false
+    diagEntryADX := na
+    diagEntryEfficiency := na
+    diagEntryRVOL := na
+    diagEntryATRRatio := na
+    diagEntryLead := na
+    diagEntryLeadEdge := na
+    diagEntryExt9ATR := na
+    diagEntryVWAPDistATR := na
+    diagEntryBodyATR := na
+    diagEntryRangeATR := na
+    diagEntryFPDirectional := na
+    diagEntryContextCount := na
+    diagEntryCrossClass := na
+    diagEntryFPClass := na
+    diagEntryMinuteET := na
+    diagEntryDOW := na
+    diagEntryMonth := na
+    diagEntryExhaustion := na
+    diagEntryChop := false
+    diagEntryStrongTrend := false
+    diagLowLossArmed := false
+    diagProfitFloorStarted := false
+    diagStrongFloorStarted := false
+
+if not dayDone and inStopEval and sessionExhaustedPersistent and tradeDirection == 0 and strategy.position_size == 0
+    dayDone := true
+    dayDoneEvent := true
+    stopDayEvent := true
+
+if not dayDone and inHardStop and (not useV24Opportunity or not v24EnableCloseMomentum or currentMinuteET >= 960)
+    dayDone := true
+    dayDoneEvent := true
+    stopDayEvent := true
+
+if stopDayEvent
+    if showLabels
+        label.new(
+             bar_index, high,
+             "STOP TRADING FOR TODAY\n" +
+             (inHardStop ? "TIME CUTOFF" : "SESSION EDGE EXHAUSTED"),
+             style = label.style_label_down,
+             color = color.gray,
+             textcolor = color.white,
+             size = size.normal
+        )
+
+plot(showEMAs ? ema9 : na, "EMA 9", color = color.yellow, linewidth = 1)
+plot(showEMAs ? ema21 : na, "EMA 21", color = color.orange, linewidth = 2)
+plot(showEMAs ? ema50 : na, "EMA 50", color = color.aqua, linewidth = 2)
+plot(showVWAP ? vwap : na, "VWAP", color = color.white, linewidth = 2)
+
+plot(showOR and not inOpeningRange ? openingHigh : na, "Opening Range High", color = color.new(color.lime, 35), style = plot.style_linebr)
+plot(showOR and not inOpeningRange ? openingLow : na, "Opening Range Low", color = color.new(color.red, 35), style = plot.style_linebr)
+plot(showPD ? pdh : na, "PDH", color = color.new(color.blue, 35), style = plot.style_linebr)
+plot(showPD ? pdl : na, "PDL", color = color.new(color.blue, 35), style = plot.style_linebr)
+
+plot(showTradeLines ? histEntryLine : na, "Trade Entry", color = color.yellow, linewidth = 2, style = plot.style_linebr)
+plot(showTradeLines ? histTargetLine : na, "Trade Target", color = color.lime, linewidth = 3, style = plot.style_linebr)
+plot(showTradeLines ? histStopLine : na, "Active / Low-Loss Stop", color = color.orange, linewidth = 3, style = plot.style_linebr)
+plot(showTradeLines ? histHardStopLine : na, "Original Hard Stop", color = color.red, linewidth = 2, style = plot.style_linebr)
+
+plot(longLeadScore, "Hidden Long Development Score", display = display.data_window)
+plot(shortLeadScore, "Hidden Short Development Score", display = display.data_window)
+plot(tradeDirection != 0 ? tradeHealth : na, "Hidden Trade Health", display = display.data_window)
+plot(fpAvailable ? fpDeltaPct * 100.0 : na, "Footprint Delta %", display = display.data_window)
+float proofTrailVisual =
+     tradeDirection == 1 and tradeMFE >= entryATR * proofTrailActivateATR ? entryPrice + tradeMFE - entryATR * proofTrailOffsetATR :
+     tradeDirection == -1 and tradeMFE >= entryATR * proofTrailActivateATR ? entryPrice - tradeMFE + entryATR * proofTrailOffsetATR : na
+plot(proofTrailVisual, "v2.3 Proof Trail", display = display.data_window)
+
+color stateBg =
+     fpRequiredMissing ? color.new(color.orange, 90) :
+     dayDone and inTradeSession ? color.new(color.gray, 95) : na
+bgcolor(stateBg)
+
+dirHitRate = researchTrades > 0 ? researchDirHits * 100.0 / researchTrades : na
+avgDuration = researchTrades > 0 ? totalDurationMinutes / researchTrades : na
+winRate = strategy.closedtrades > 0 ? strategy.wintrades * 100.0 / strategy.closedtrades : na
+avgCapturePct = researchTrades > 0 ? totalCapturePct / researchTrades : na
+avgWinnerCapturePct = researchWinners > 0 ? winnerCapturePctTotal / researchWinners : na
+dirHitToWinPct = researchDirHits > 0 ? dirHitWins * 100.0 / researchDirHits : na
+avgDirHitGivebackPct = researchDirHits > 0 ? dirHitGivebackPctTotal / researchDirHits : na
+cleanWinRate = cleanTrades > 0 ? cleanWins * 100.0 / cleanTrades : na
+
+string managementMode =
+     tradeDirection == 0 ? "-" :
+     runnerActivated ? "RUNNER" :
+     (fastImpulseLong or fastImpulseShort) ? "IMPULSE" :
+     "NORMAL"
+
+string actionState =
+     dayDone ? "STOP TRADING" :
+     tradeDirection == 1 ? "HOLD CALL" :
+     tradeDirection == -1 ? "HOLD PUT" :
+     longSignal ? "ENTER CALL" :
+     shortSignal ? "ENTER PUT" :
+     inTradeSession ? "SCANNING" : "CLOSED"
+
+string marketState =
+     chopCondition ? "CHOP" :
+     strongLongTrend ? "STRONG UP" :
+     strongShortTrend ? "STRONG DOWN" :
+     efficiency >= minEntryEfficiency ? "MOVING" : "MIXED"
+
+string crossState =
+     not useCrossMarket ? "OFF" :
+     crossBullCount >= 2 ? "BULL" :
+     crossBearCount >= 2 ? "BEAR" : "MIXED"
+
+float strategyPFDiag = f_diagPF(diagCallGP + diagPutGP, diagCallGL + diagPutGL)
+float avgMFEATRAll = researchTrades > 0 ? diagTotalMFEATR / researchTrades : na
+float avgMAEATRAll = researchTrades > 0 ? diagTotalMAEATR / researchTrades : na
+float avgWinnerMFEATR = researchWinners > 0 ? diagWinnerMFEATR / researchWinners : na
+float avgWinnerMAEATR = researchWinners > 0 ? diagWinnerMAEATR / researchWinners : na
+float avgLoserMFEATR = diagLosers > 0 ? diagLoserMFEATR / diagLosers : na
+float avgLoserMAEATR = diagLosers > 0 ? diagLoserMAEATR / diagLosers : na
+float avgRealizedRAll = researchTrades > 0 ? diagTotalRealizedR / researchTrades : na
+float avgWinnerR = researchWinners > 0 ? diagWinnerRealizedR / researchWinners : na
+float avgLoserR = diagLosers > 0 ? diagLoserRealizedR / diagLosers : na
+float avgWinnerTime = researchWinners > 0 ? diagWinnerDuration / researchWinners : na
+float avgLoserTime = diagLosers > 0 ? diagLoserDuration / diagLosers : na
+float longAcceptPct = diagLongCandidates > 0 ? diagLongAccepted * 100.0 / diagLongCandidates : na
+float shortAcceptPct = diagShortCandidates > 0 ? diagShortAccepted * 100.0 / diagShortCandidates : na
+
+f_diagPage1C0(table t) =>
+    f_header(t, 0, "LIVE / MARKET", syminfo.ticker + " / " + timeframe.period)
+    f_pair(t, 0, 1, "ACTION", actionState, dayDone ? color.gray : tradeDirection == 1 or longSignal ? color.lime : tradeDirection == -1 or shortSignal ? color.red : color.white)
+    f_pair(t, 0, 2, "Setup", tradeDirection != 0 ? activeSetup + " / " + activeEntryTier : "-", color.white)
+    f_pair(t, 0, 3, "Age / Expected", tradeDirection != 0 ? str.tostring(nz(tradeAgeMinutes, 0), "#.0") + " / " + str.tostring(expectedMinutes, "#") + "m" : "-", color.white)
+    f_pair(t, 0, 4, "Move Progress", tradeDirection != 0 ? str.tostring(currentProgress * 100.0, "#") + "%" : "-", currentProgress >= 0.5 ? color.lime : color.white)
+    f_pair(t, 0, 5, "Market", marketState, marketState == "CHOP" ? color.orange : color.white)
+    f_pair(t, 0, 6, "Efficiency", str.tostring(efficiency, "#.##"), efficiency >= minEntryEfficiency ? color.lime : color.orange)
+    f_pair(t, 0, 7, "ADX", str.tostring(adx, "#.0"), adx >= strongTrendADX ? color.lime : color.white)
+    f_pair(t, 0, 8, "ATR Regime", str.tostring(atrRatio, "#.##") + "x", atrRatio >= 1.0 ? color.lime : color.white)
+    f_pair(t, 0, 9, "RVOL", str.tostring(rvol, "#.##") + "x", rvol >= 1.0 ? color.lime : color.white)
+    f_pair(t, 0, 10, "Cross Market", crossState, crossState == "BULL" ? color.lime : crossState == "BEAR" ? color.red : color.white)
+    f_pair(t, 0, 11, "Footprint Delta", fpAvailable ? str.tostring(fpDeltaPct * 100.0, "#.1") + "%" : "N/A", fpStrongBuy ? color.lime : fpStrongSell ? color.red : color.white)
+    f_pair(t, 0, 12, "Long / Short Dev", str.tostring(longLeadScore, "#") + " / " + str.tostring(shortLeadScore, "#"), color.white)
+    f_pair(t, 0, 13, "Trade Health", tradeDirection != 0 ? str.tostring(tradeHealth, "#") : "-", tradeDirection != 0 and tradeHealth <= healthExitLevel ? color.orange : color.white)
+    f_pair(t, 0, 14, "Day Exhaust", str.tostring(exhaustionCount) + "/7", sessionExhaustedPersistent ? color.orange : color.white)
+    f_pair(t, 0, 15, "Trade Mode", managementMode, managementMode == "RUNNER" ? color.lime : managementMode == "IMPULSE" ? color.yellow : color.white)
+    f_pair(t, 0, 16, "Exec Mode", executionMode, color.aqua)
+    f_pair(t, 0, 17, "Mode", "FULL GRID", color.aqua)
+
+f_diagPage1C2(table t) =>
+    f_header(t, 2, "QUALITY / CAPTURE", "v2.5")
+    f_pair(t, 2, 1, "Strategy WR", strategy.closedtrades > 0 ? str.tostring(winRate, "#.1") + "% (" + str.tostring(strategy.wintrades) + "/" + str.tostring(strategy.closedtrades) + ")" : "-", strategy.closedtrades > 0 and winRate >= 55 ? color.lime : color.orange)
+    f_pair(t, 2, 2, "Strategy PF", na(strategyPFDiag) ? "-" : str.tostring(strategyPFDiag, "#.##"), not na(strategyPFDiag) and strategyPFDiag >= 1.25 ? color.lime : not na(strategyPFDiag) and strategyPFDiag < 1 ? color.orange : color.white)
+    f_pair(t, 2, 3, "Dir Hit Rate", researchTrades > 0 ? str.tostring(dirHitRate, "#.1") + "% (" + str.tostring(researchDirHits) + "/" + str.tostring(researchTrades) + ")" : "-", dirHitRate >= 70 ? color.lime : color.white)
+    f_pair(t, 2, 4, "Dir Hit -> Win", researchDirHits > 0 ? str.tostring(dirHitToWinPct, "#.1") + "%" : "-", dirHitToWinPct >= 80 ? color.lime : color.orange)
+    f_pair(t, 2, 5, "Dir Hit Losses", str.tostring(dirHitLosses), dirHitLosses > 0 ? color.orange : color.white)
+    f_pair(t, 2, 6, "Avg Capture", researchTrades > 0 ? str.tostring(avgCapturePct, "#.1") + "%" : "-", avgCapturePct >= 50 ? color.lime : color.orange)
+    f_pair(t, 2, 7, "Winner Capture", researchWinners > 0 ? str.tostring(avgWinnerCapturePct, "#.1") + "%" : "-", avgWinnerCapturePct >= 60 ? color.lime : color.orange)
+    f_pair(t, 2, 8, "Dir Hit Giveback", researchDirHits > 0 ? str.tostring(avgDirHitGivebackPct, "#.1") + "%" : "-", avgDirHitGivebackPct <= 35 ? color.lime : color.orange)
+    f_pair(t, 2, 9, "Avg MFE / MAE", researchTrades > 0 ? str.tostring(avgMFEATRAll, "#.2") + "R / " + str.tostring(avgMAEATRAll, "#.2") + "R" : "-", color.white)
+    f_pair(t, 2, 10, "Winner MFE / MAE", researchWinners > 0 ? str.tostring(avgWinnerMFEATR, "#.2") + " / " + str.tostring(avgWinnerMAEATR, "#.2") : "-", color.lime)
+    f_pair(t, 2, 11, "Loser MFE / MAE", diagLosers > 0 ? str.tostring(avgLoserMFEATR, "#.2") + " / " + str.tostring(avgLoserMAEATR, "#.2") : "-", color.orange)
+    f_pair(t, 2, 12, "Avg R / Trade", researchTrades > 0 ? str.tostring(avgRealizedRAll, "#.3") : "-", avgRealizedRAll > 0 ? color.lime : color.orange)
+    f_pair(t, 2, 13, "Avg Win R", researchWinners > 0 ? str.tostring(avgWinnerR, "#.3") : "-", color.lime)
+    f_pair(t, 2, 14, "Avg Loss R", diagLosers > 0 ? str.tostring(avgLoserR, "#.3") : "-", color.orange)
+    f_pair(t, 2, 15, "Avg Trade Time", researchTrades > 0 ? str.tostring(avgDuration, "#.1") + "m" : "-", color.white)
+    f_pair(t, 2, 16, "Same-Bar Ambig", str.tostring(ambiguousSameBarTrades), ambiguousSameBarTrades > 0 ? color.orange : color.white)
+    f_pair(t, 2, 17, "Clean WR", cleanTrades > 0 ? str.tostring(cleanWinRate, "#.1") + "%" : "-", cleanWinRate >= 55 ? color.lime : color.white)
+
+f_diagPage1C4(table t) =>
+    f_header(t, 4, "SETUP PERFORMANCE", "Trades | WR | PF")
+    f_pair(t, 4, 1, "CALL", f_diagLine(diagCallTrades, diagCallWins, diagCallGP, diagCallGL), f_diagColor(diagCallTrades, diagCallWins, diagCallGP, diagCallGL))
+    f_pair(t, 4, 2, "PUT", f_diagLine(diagPutTrades, diagPutWins, diagPutGP, diagPutGL), f_diagColor(diagPutTrades, diagPutWins, diagPutGP, diagPutGL))
+    f_pair(t, 4, 3, "Opening Range BO", f_diagLine(diagORTrades, diagORWins, diagORGP, diagORGL), f_diagColor(diagORTrades, diagORWins, diagORGP, diagORGL))
+    f_pair(t, 4, 4, "Breakout", f_diagLine(diagBOTrades, diagBOWins, diagBOGP, diagBOGL), f_diagColor(diagBOTrades, diagBOWins, diagBOGP, diagBOGL))
+    f_pair(t, 4, 5, "Liquidity Rev", f_diagLine(diagLiqTrades, diagLiqWins, diagLiqGP, diagLiqGL), f_diagColor(diagLiqTrades, diagLiqWins, diagLiqGP, diagLiqGL))
+    f_pair(t, 4, 6, "EMA Pullback", f_diagLine(diagEMATrades, diagEMAWins, diagEMAGP, diagEMAGL), f_diagColor(diagEMATrades, diagEMAWins, diagEMAGP, diagEMAGL))
+    f_pair(t, 4, 7, "VWAP Reclaim", f_diagLine(diagVWAPTrades, diagVWAPWins, diagVWAPGP, diagVWAPGL), f_diagColor(diagVWAPTrades, diagVWAPWins, diagVWAPGP, diagVWAPGL))
+    f_pair(t, 4, 8, "Early Continuation", f_diagLine(diagEarlyTrades, diagEarlyWins, diagEarlyGP, diagEarlyGL), f_diagColor(diagEarlyTrades, diagEarlyWins, diagEarlyGP, diagEarlyGL))
+    f_pair(t, 4, 10, "CALL Accept", diagLongCandidates > 0 ? str.tostring(diagLongAccepted) + "/" + str.tostring(diagLongCandidates) + " = " + str.tostring(longAcceptPct, "#.1") + "%" : "-", color.white)
+    f_pair(t, 4, 11, "PUT Accept", diagShortCandidates > 0 ? str.tostring(diagShortAccepted) + "/" + str.tostring(diagShortCandidates) + " = " + str.tostring(shortAcceptPct, "#.1") + "%" : "-", color.white)
+    f_pair(t, 4, 12, "Signal Conflicts", str.tostring(diagSignalConflicts), diagSignalConflicts > 0 ? color.orange : color.white)
+    f_pair(t, 4, 13, "Chase Blocks C/P", str.tostring(openingChaseCallBlocks) + " / " + str.tostring(openingChasePutBlocks), color.orange)
+    f_pair(t, 4, 14, "Climax Blocks C/P", str.tostring(firstHourClimaxCallBlocks) + " / " + str.tostring(firstHourClimaxPutBlocks), color.orange)
+    f_pair(t, 4, 15, "PUT EMA Blocks", str.tostring(putEMABlocks), color.orange)
+    f_pair(t, 4, 16, "Early PUT BO Blocks", str.tostring(earlyPutBreakoutBlocks), color.orange)
+    f_pair(t, 4, 17, "VERSION", "v2.10 CONTEXT RESCUE", color.aqua)
+
+f_diagPage1C6(table t) =>
+    f_header(t, 6, "SIDE x SETUP", "Trades | WR | PF")
+    f_pair(t, 6, 1, "CALL OR", f_diagArrLine(diagSetupSideT, diagSetupSideW, diagSetupSideGP, diagSetupSideGL, 0), f_diagArrColor(diagSetupSideT, diagSetupSideW, diagSetupSideGP, diagSetupSideGL, 0))
+    f_pair(t, 6, 2, "CALL Breakout", f_diagArrLine(diagSetupSideT, diagSetupSideW, diagSetupSideGP, diagSetupSideGL, 1), f_diagArrColor(diagSetupSideT, diagSetupSideW, diagSetupSideGP, diagSetupSideGL, 1))
+    f_pair(t, 6, 3, "CALL Liquidity", f_diagArrLine(diagSetupSideT, diagSetupSideW, diagSetupSideGP, diagSetupSideGL, 2), f_diagArrColor(diagSetupSideT, diagSetupSideW, diagSetupSideGP, diagSetupSideGL, 2))
+    f_pair(t, 6, 4, "CALL EMA PB", f_diagArrLine(diagSetupSideT, diagSetupSideW, diagSetupSideGP, diagSetupSideGL, 3), f_diagArrColor(diagSetupSideT, diagSetupSideW, diagSetupSideGP, diagSetupSideGL, 3))
+    f_pair(t, 6, 5, "CALL VWAP", f_diagArrLine(diagSetupSideT, diagSetupSideW, diagSetupSideGP, diagSetupSideGL, 4), f_diagArrColor(diagSetupSideT, diagSetupSideW, diagSetupSideGP, diagSetupSideGL, 4))
+    f_pair(t, 6, 6, "CALL Early", f_diagArrLine(diagSetupSideT, diagSetupSideW, diagSetupSideGP, diagSetupSideGL, 5), f_diagArrColor(diagSetupSideT, diagSetupSideW, diagSetupSideGP, diagSetupSideGL, 5))
+    f_pair(t, 6, 8, "PUT OR", f_diagArrLine(diagSetupSideT, diagSetupSideW, diagSetupSideGP, diagSetupSideGL, 6), f_diagArrColor(diagSetupSideT, diagSetupSideW, diagSetupSideGP, diagSetupSideGL, 6))
+    f_pair(t, 6, 9, "PUT Breakout", f_diagArrLine(diagSetupSideT, diagSetupSideW, diagSetupSideGP, diagSetupSideGL, 7), f_diagArrColor(diagSetupSideT, diagSetupSideW, diagSetupSideGP, diagSetupSideGL, 7))
+    f_pair(t, 6, 10, "PUT Liquidity", f_diagArrLine(diagSetupSideT, diagSetupSideW, diagSetupSideGP, diagSetupSideGL, 8), f_diagArrColor(diagSetupSideT, diagSetupSideW, diagSetupSideGP, diagSetupSideGL, 8))
+    f_pair(t, 6, 11, "PUT EMA PB", f_diagArrLine(diagSetupSideT, diagSetupSideW, diagSetupSideGP, diagSetupSideGL, 9), f_diagArrColor(diagSetupSideT, diagSetupSideW, diagSetupSideGP, diagSetupSideGL, 9))
+    f_pair(t, 6, 12, "PUT VWAP", f_diagArrLine(diagSetupSideT, diagSetupSideW, diagSetupSideGP, diagSetupSideGL, 10), f_diagArrColor(diagSetupSideT, diagSetupSideW, diagSetupSideGP, diagSetupSideGL, 10))
+    f_pair(t, 6, 13, "PUT Early", f_diagArrLine(diagSetupSideT, diagSetupSideW, diagSetupSideGP, diagSetupSideGL, 11), f_diagArrColor(diagSetupSideT, diagSetupSideW, diagSetupSideGP, diagSetupSideGL, 11))
+
+f_diagPage1C8(table t) =>
+    f_header(t, 8, "MANAGEMENT COHORTS", "Trades | WR | PF")
+    f_pair(t, 8, 1, "Low-Loss Armed", f_diagArrLine(diagMgmtT, diagMgmtW, diagMgmtGP, diagMgmtGL, 0), f_diagArrColor(diagMgmtT, diagMgmtW, diagMgmtGP, diagMgmtGL, 0))
+    f_pair(t, 8, 2, "Profit Floor .30", f_diagArrLine(diagMgmtT, diagMgmtW, diagMgmtGP, diagMgmtGL, 1), f_diagArrColor(diagMgmtT, diagMgmtW, diagMgmtGP, diagMgmtGL, 1))
+    f_pair(t, 8, 3, "Strong Floor .50", f_diagArrLine(diagMgmtT, diagMgmtW, diagMgmtGP, diagMgmtGL, 2), f_diagArrColor(diagMgmtT, diagMgmtW, diagMgmtGP, diagMgmtGL, 2))
+    f_pair(t, 8, 4, "Runner Activated", f_diagArrLine(diagMgmtT, diagMgmtW, diagMgmtGP, diagMgmtGL, 3), f_diagArrColor(diagMgmtT, diagMgmtW, diagMgmtGP, diagMgmtGL, 3))
+    f_pair(t, 8, 5, "Target Extended", f_diagArrLine(diagMgmtT, diagMgmtW, diagMgmtGP, diagMgmtGL, 4), f_diagArrColor(diagMgmtT, diagMgmtW, diagMgmtGP, diagMgmtGL, 4))
+    f_pair(t, 8, 7, "MFE >= .15", f_diagArrLine(diagMFET, diagMFEW, diagMFEGP, diagMFEGL, 0), f_diagArrColor(diagMFET, diagMFEW, diagMFEGP, diagMFEGL, 0))
+    f_pair(t, 8, 8, "MFE >= .30", f_diagArrLine(diagMFET, diagMFEW, diagMFEGP, diagMFEGL, 1), f_diagArrColor(diagMFET, diagMFEW, diagMFEGP, diagMFEGL, 1))
+    f_pair(t, 8, 9, "MFE >= .50", f_diagArrLine(diagMFET, diagMFEW, diagMFEGP, diagMFEGL, 2), f_diagArrColor(diagMFET, diagMFEW, diagMFEGP, diagMFEGL, 2))
+    f_pair(t, 8, 10, "MFE >= .75", f_diagArrLine(diagMFET, diagMFEW, diagMFEGP, diagMFEGL, 3), f_diagArrColor(diagMFET, diagMFEW, diagMFEGP, diagMFEGL, 3))
+    f_pair(t, 8, 11, "MFE >= 1.00", f_diagArrLine(diagMFET, diagMFEW, diagMFEGP, diagMFEGL, 4), f_diagArrColor(diagMFET, diagMFEW, diagMFEGP, diagMFEGL, 4))
+    f_pair(t, 8, 13, "Loss after .30 MFE", str.tostring(diagLossAfterMFE30), diagLossAfterMFE30 > 0 ? color.orange : color.white)
+    f_pair(t, 8, 14, "Loss after .50 MFE", str.tostring(diagLossAfterMFE50), diagLossAfterMFE50 > 0 ? color.orange : color.white)
+    f_pair(t, 8, 15, "Win capture < 50%", str.tostring(diagWinnerCaptureUnder50), diagWinnerCaptureUnder50 > 0 ? color.orange : color.white)
+    f_pair(t, 8, 16, "Win capture >= 75%", str.tostring(diagWinnerCaptureOver75), color.lime)
+
+f_diagPage2C0(table t) =>
+    f_header(t, 0, "DAY OF WEEK", "Trades | WR | PF")
+    f_pair(t, 0, 1, "Monday", f_diagArrLine(diagDayT, diagDayW, diagDayGP, diagDayGL, 0), f_diagArrColor(diagDayT, diagDayW, diagDayGP, diagDayGL, 0))
+    f_pair(t, 0, 2, "Tuesday", f_diagArrLine(diagDayT, diagDayW, diagDayGP, diagDayGL, 1), f_diagArrColor(diagDayT, diagDayW, diagDayGP, diagDayGL, 1))
+    f_pair(t, 0, 3, "Wednesday", f_diagArrLine(diagDayT, diagDayW, diagDayGP, diagDayGL, 2), f_diagArrColor(diagDayT, diagDayW, diagDayGP, diagDayGL, 2))
+    f_pair(t, 0, 4, "Thursday", f_diagArrLine(diagDayT, diagDayW, diagDayGP, diagDayGL, 3), f_diagArrColor(diagDayT, diagDayW, diagDayGP, diagDayGL, 3))
+    f_pair(t, 0, 5, "Friday", f_diagArrLine(diagDayT, diagDayW, diagDayGP, diagDayGL, 4), f_diagArrColor(diagDayT, diagDayW, diagDayGP, diagDayGL, 4))
+    f_pair(t, 0, 8, "Strategy Trades", str.tostring(researchTrades), color.white)
+    f_pair(t, 0, 9, "Win Rate", na(winRate) ? "-" : str.tostring(winRate, "#.1") + "%", color.white)
+    f_pair(t, 0, 10, "Profit Factor", na(strategyPFDiag) ? "-" : str.tostring(strategyPFDiag, "#.##"), color.white)
+
+f_diagPage2C2(table t) =>
+    f_header(t, 2, "ENTRY TIME (ET)", "Trades | WR | PF")
+    f_pair(t, 2, 1, "09:30-10:00", f_diagArrLine(diagTimeT, diagTimeW, diagTimeGP, diagTimeGL, 0), f_diagArrColor(diagTimeT, diagTimeW, diagTimeGP, diagTimeGL, 0))
+    f_pair(t, 2, 2, "13:00-14:00", f_diagArrLine(diagTimeT, diagTimeW, diagTimeGP, diagTimeGL, 1), f_diagArrColor(diagTimeT, diagTimeW, diagTimeGP, diagTimeGL, 1))
+    f_pair(t, 2, 3, "14:00-15:00", f_diagArrLine(diagTimeT, diagTimeW, diagTimeGP, diagTimeGL, 2), f_diagArrColor(diagTimeT, diagTimeW, diagTimeGP, diagTimeGL, 2))
+    f_pair(t, 2, 4, "12:00-13:00", f_diagArrLine(diagTimeT, diagTimeW, diagTimeGP, diagTimeGL, 3), f_diagArrColor(diagTimeT, diagTimeW, diagTimeGP, diagTimeGL, 3))
+    f_pair(t, 2, 5, "13:00-14:00", f_diagArrLine(diagTimeT, diagTimeW, diagTimeGP, diagTimeGL, 4), f_diagArrColor(diagTimeT, diagTimeW, diagTimeGP, diagTimeGL, 4))
+    f_pair(t, 2, 6, "14:00-15:00", f_diagArrLine(diagTimeT, diagTimeW, diagTimeGP, diagTimeGL, 5), f_diagArrColor(diagTimeT, diagTimeW, diagTimeGP, diagTimeGL, 5))
+    f_pair(t, 2, 7, "15:00-16:15", f_diagArrLine(diagTimeT, diagTimeW, diagTimeGP, diagTimeGL, 6), f_diagArrColor(diagTimeT, diagTimeW, diagTimeGP, diagTimeGL, 6))
+    f_pair(t, 2, 10, "Open-window note", "QQQ Eastern time", color.white)
+
+f_diagPage2C4(table t) =>
+    f_header(t, 4, "MONTHS JAN-JUN", "Trades | WR | PF")
+    f_pair(t, 4, 1, "January", f_diagArrLine(diagMonthT, diagMonthW, diagMonthGP, diagMonthGL, 0), f_diagArrColor(diagMonthT, diagMonthW, diagMonthGP, diagMonthGL, 0))
+    f_pair(t, 4, 2, "February", f_diagArrLine(diagMonthT, diagMonthW, diagMonthGP, diagMonthGL, 1), f_diagArrColor(diagMonthT, diagMonthW, diagMonthGP, diagMonthGL, 1))
+    f_pair(t, 4, 3, "March", f_diagArrLine(diagMonthT, diagMonthW, diagMonthGP, diagMonthGL, 2), f_diagArrColor(diagMonthT, diagMonthW, diagMonthGP, diagMonthGL, 2))
+    f_pair(t, 4, 4, "April", f_diagArrLine(diagMonthT, diagMonthW, diagMonthGP, diagMonthGL, 3), f_diagArrColor(diagMonthT, diagMonthW, diagMonthGP, diagMonthGL, 3))
+    f_pair(t, 4, 5, "May", f_diagArrLine(diagMonthT, diagMonthW, diagMonthGP, diagMonthGL, 4), f_diagArrColor(diagMonthT, diagMonthW, diagMonthGP, diagMonthGL, 4))
+    f_pair(t, 4, 6, "June", f_diagArrLine(diagMonthT, diagMonthW, diagMonthGP, diagMonthGL, 5), f_diagArrColor(diagMonthT, diagMonthW, diagMonthGP, diagMonthGL, 5))
+
+f_diagPage2C6(table t) =>
+    f_header(t, 6, "MONTHS JUL-DEC", "Trades | WR | PF")
+    f_pair(t, 6, 1, "July", f_diagArrLine(diagMonthT, diagMonthW, diagMonthGP, diagMonthGL, 6), f_diagArrColor(diagMonthT, diagMonthW, diagMonthGP, diagMonthGL, 6))
+    f_pair(t, 6, 2, "August", f_diagArrLine(diagMonthT, diagMonthW, diagMonthGP, diagMonthGL, 7), f_diagArrColor(diagMonthT, diagMonthW, diagMonthGP, diagMonthGL, 7))
+    f_pair(t, 6, 3, "September", f_diagArrLine(diagMonthT, diagMonthW, diagMonthGP, diagMonthGL, 8), f_diagArrColor(diagMonthT, diagMonthW, diagMonthGP, diagMonthGL, 8))
+    f_pair(t, 6, 4, "October", f_diagArrLine(diagMonthT, diagMonthW, diagMonthGP, diagMonthGL, 9), f_diagArrColor(diagMonthT, diagMonthW, diagMonthGP, diagMonthGL, 9))
+    f_pair(t, 6, 5, "November", f_diagArrLine(diagMonthT, diagMonthW, diagMonthGP, diagMonthGL, 10), f_diagArrColor(diagMonthT, diagMonthW, diagMonthGP, diagMonthGL, 10))
+    f_pair(t, 6, 6, "December", f_diagArrLine(diagMonthT, diagMonthW, diagMonthGP, diagMonthGL, 11), f_diagArrColor(diagMonthT, diagMonthW, diagMonthGP, diagMonthGL, 11))
+    f_pair(t, 6, 9, "Goal", "Spot regime months", color.aqua)
+
+f_diagPage2C8(table t) =>
+    f_header(t, 8, "DURATION / TIMING", "Trades | WR | PF")
+    f_pair(t, 8, 1, "< 5 min", f_diagArrLine(diagDurationT, diagDurationW, diagDurationGP, diagDurationGL, 0), f_diagArrColor(diagDurationT, diagDurationW, diagDurationGP, diagDurationGL, 0))
+    f_pair(t, 8, 2, "5-10 min", f_diagArrLine(diagDurationT, diagDurationW, diagDurationGP, diagDurationGL, 1), f_diagArrColor(diagDurationT, diagDurationW, diagDurationGP, diagDurationGL, 1))
+    f_pair(t, 8, 3, "10-20 min", f_diagArrLine(diagDurationT, diagDurationW, diagDurationGP, diagDurationGL, 2), f_diagArrColor(diagDurationT, diagDurationW, diagDurationGP, diagDurationGL, 2))
+    f_pair(t, 8, 4, ">= 20 min", f_diagArrLine(diagDurationT, diagDurationW, diagDurationGP, diagDurationGL, 3), f_diagArrColor(diagDurationT, diagDurationW, diagDurationGP, diagDurationGL, 3))
+    f_pair(t, 8, 6, "Avg Winner Time", researchWinners > 0 ? str.tostring(avgWinnerTime, "#.1") + "m" : "-", color.lime)
+    f_pair(t, 8, 7, "Avg Loser Time", diagLosers > 0 ? str.tostring(avgLoserTime, "#.1") + "m" : "-", color.orange)
+    f_pair(t, 8, 9, "Avg All Time", researchTrades > 0 ? str.tostring(avgDuration, "#.1") + "m" : "-", color.white)
+
+f_diagPage3C0(table t) =>
+    f_header(t, 0, "ADX / EFFICIENCY", "Trades | WR | PF")
+    f_pair(t, 0, 1, "ADX < 18", f_diagArrLine(diagADXT, diagADXW, diagADXGP, diagADXGL, 0), f_diagArrColor(diagADXT, diagADXW, diagADXGP, diagADXGL, 0))
+    f_pair(t, 0, 2, "ADX 18-23", f_diagArrLine(diagADXT, diagADXW, diagADXGP, diagADXGL, 1), f_diagArrColor(diagADXT, diagADXW, diagADXGP, diagADXGL, 1))
+    f_pair(t, 0, 3, "ADX 23-30", f_diagArrLine(diagADXT, diagADXW, diagADXGP, diagADXGL, 2), f_diagArrColor(diagADXT, diagADXW, diagADXGP, diagADXGL, 2))
+    f_pair(t, 0, 4, "ADX >= 30", f_diagArrLine(diagADXT, diagADXW, diagADXGP, diagADXGL, 3), f_diagArrColor(diagADXT, diagADXW, diagADXGP, diagADXGL, 3))
+    f_pair(t, 0, 6, "Eff < .27", f_diagArrLine(diagEffT, diagEffW, diagEffGP, diagEffGL, 0), f_diagArrColor(diagEffT, diagEffW, diagEffGP, diagEffGL, 0))
+    f_pair(t, 0, 7, "Eff .27-.40", f_diagArrLine(diagEffT, diagEffW, diagEffGP, diagEffGL, 1), f_diagArrColor(diagEffT, diagEffW, diagEffGP, diagEffGL, 1))
+    f_pair(t, 0, 8, "Eff .40-.55", f_diagArrLine(diagEffT, diagEffW, diagEffGP, diagEffGL, 2), f_diagArrColor(diagEffT, diagEffW, diagEffGP, diagEffGL, 2))
+    f_pair(t, 0, 9, "Eff >= .55", f_diagArrLine(diagEffT, diagEffW, diagEffGP, diagEffGL, 3), f_diagArrColor(diagEffT, diagEffW, diagEffGP, diagEffGL, 3))
+    f_pair(t, 0, 11, "Context 2/3", f_diagArrLine(diagContextT, diagContextW, diagContextGP, diagContextGL, 0), f_diagArrColor(diagContextT, diagContextW, diagContextGP, diagContextGL, 0))
+    f_pair(t, 0, 12, "Context 3/3", f_diagArrLine(diagContextT, diagContextW, diagContextGP, diagContextGL, 1), f_diagArrColor(diagContextT, diagContextW, diagContextGP, diagContextGL, 1))
+
+f_diagPage3C2(table t) =>
+    f_header(t, 2, "RVOL / ATR REGIME", "Trades | WR | PF")
+    f_pair(t, 2, 1, "RVOL < .80", f_diagArrLine(diagRVOLT, diagRVOLW, diagRVOLGP, diagRVOLGL, 0), f_diagArrColor(diagRVOLT, diagRVOLW, diagRVOLGP, diagRVOLGL, 0))
+    f_pair(t, 2, 2, "RVOL .80-1.0", f_diagArrLine(diagRVOLT, diagRVOLW, diagRVOLGP, diagRVOLGL, 1), f_diagArrColor(diagRVOLT, diagRVOLW, diagRVOLGP, diagRVOLGL, 1))
+    f_pair(t, 2, 3, "RVOL 1.0-1.3", f_diagArrLine(diagRVOLT, diagRVOLW, diagRVOLGP, diagRVOLGL, 2), f_diagArrColor(diagRVOLT, diagRVOLW, diagRVOLGP, diagRVOLGL, 2))
+    f_pair(t, 2, 4, "RVOL >= 1.3", f_diagArrLine(diagRVOLT, diagRVOLW, diagRVOLGP, diagRVOLGL, 3), f_diagArrColor(diagRVOLT, diagRVOLW, diagRVOLGP, diagRVOLGL, 3))
+    f_pair(t, 2, 6, "ATR ratio < .80", f_diagArrLine(diagATRT, diagATRW, diagATRGP, diagATRGL, 0), f_diagArrColor(diagATRT, diagATRW, diagATRGP, diagATRGL, 0))
+    f_pair(t, 2, 7, "ATR .80-1.0", f_diagArrLine(diagATRT, diagATRW, diagATRGP, diagATRGL, 1), f_diagArrColor(diagATRT, diagATRW, diagATRGP, diagATRGL, 1))
+    f_pair(t, 2, 8, "ATR 1.0-1.2", f_diagArrLine(diagATRT, diagATRW, diagATRGP, diagATRGL, 2), f_diagArrColor(diagATRT, diagATRW, diagATRGP, diagATRGL, 2))
+    f_pair(t, 2, 9, "ATR >= 1.2", f_diagArrLine(diagATRT, diagATRW, diagATRGP, diagATRGL, 3), f_diagArrColor(diagATRT, diagATRW, diagATRGP, diagATRGL, 3))
+
+f_diagPage3C4(table t) =>
+    f_header(t, 4, "LEAD SCORE / EDGE", "Trades | WR | PF")
+    f_pair(t, 4, 1, "Lead < 60", f_diagArrLine(diagLeadT, diagLeadW, diagLeadGP, diagLeadGL, 0), f_diagArrColor(diagLeadT, diagLeadW, diagLeadGP, diagLeadGL, 0))
+    f_pair(t, 4, 2, "Lead 60-70", f_diagArrLine(diagLeadT, diagLeadW, diagLeadGP, diagLeadGL, 1), f_diagArrColor(diagLeadT, diagLeadW, diagLeadGP, diagLeadGL, 1))
+    f_pair(t, 4, 3, "Lead 70-80", f_diagArrLine(diagLeadT, diagLeadW, diagLeadGP, diagLeadGL, 2), f_diagArrColor(diagLeadT, diagLeadW, diagLeadGP, diagLeadGL, 2))
+    f_pair(t, 4, 4, "Lead >= 80", f_diagArrLine(diagLeadT, diagLeadW, diagLeadGP, diagLeadGL, 3), f_diagArrColor(diagLeadT, diagLeadW, diagLeadGP, diagLeadGL, 3))
+    f_pair(t, 4, 6, "Lead edge < 8", f_diagArrLine(diagLeadEdgeT, diagLeadEdgeW, diagLeadEdgeGP, diagLeadEdgeGL, 0), f_diagArrColor(diagLeadEdgeT, diagLeadEdgeW, diagLeadEdgeGP, diagLeadEdgeGL, 0))
+    f_pair(t, 4, 7, "Lead edge 8-15", f_diagArrLine(diagLeadEdgeT, diagLeadEdgeW, diagLeadEdgeGP, diagLeadEdgeGL, 1), f_diagArrColor(diagLeadEdgeT, diagLeadEdgeW, diagLeadEdgeGP, diagLeadEdgeGL, 1))
+    f_pair(t, 4, 8, "Lead edge 15-25", f_diagArrLine(diagLeadEdgeT, diagLeadEdgeW, diagLeadEdgeGP, diagLeadEdgeGL, 2), f_diagArrColor(diagLeadEdgeT, diagLeadEdgeW, diagLeadEdgeGP, diagLeadEdgeGL, 2))
+    f_pair(t, 4, 9, "Lead edge >= 25", f_diagArrLine(diagLeadEdgeT, diagLeadEdgeW, diagLeadEdgeGP, diagLeadEdgeGL, 3), f_diagArrColor(diagLeadEdgeT, diagLeadEdgeW, diagLeadEdgeGP, diagLeadEdgeGL, 3))
+
+f_diagPage3C6(table t) =>
+    f_header(t, 6, "CROSS / FOOTPRINT", "Trades | WR | PF")
+    f_pair(t, 6, 1, "Cross mixed", f_diagArrLine(diagCrossT, diagCrossW, diagCrossGP, diagCrossGL, 0), f_diagArrColor(diagCrossT, diagCrossW, diagCrossGP, diagCrossGL, 0))
+    f_pair(t, 6, 2, "Cross partial", f_diagArrLine(diagCrossT, diagCrossW, diagCrossGP, diagCrossGL, 1), f_diagArrColor(diagCrossT, diagCrossW, diagCrossGP, diagCrossGL, 1))
+    f_pair(t, 6, 3, "Cross strong 2/3+", f_diagArrLine(diagCrossT, diagCrossW, diagCrossGP, diagCrossGL, 2), f_diagArrColor(diagCrossT, diagCrossW, diagCrossGP, diagCrossGL, 2))
+    f_pair(t, 6, 5, "FP unavailable/off", f_diagArrLine(diagFPT, diagFPW, diagFPGP, diagFPGL, 0), f_diagArrColor(diagFPT, diagFPW, diagFPGP, diagFPGL, 0))
+    f_pair(t, 6, 6, "FP mild opposed", f_diagArrLine(diagFPT, diagFPW, diagFPGP, diagFPGL, 1), f_diagArrColor(diagFPT, diagFPW, diagFPGP, diagFPGL, 1))
+    f_pair(t, 6, 7, "FP neutral/aligned", f_diagArrLine(diagFPT, diagFPW, diagFPGP, diagFPGL, 2), f_diagArrColor(diagFPT, diagFPW, diagFPGP, diagFPGL, 2))
+    f_pair(t, 6, 8, "FP strong aligned", f_diagArrLine(diagFPT, diagFPW, diagFPGP, diagFPGL, 3), f_diagArrColor(diagFPT, diagFPW, diagFPGP, diagFPGL, 3))
+    f_pair(t, 6, 11, "FP live delta", fpAvailable ? str.tostring(fpDeltaPct * 100.0, "#.1") + "%" : "N/A", color.white)
+    f_pair(t, 6, 12, "Cross live", crossState, color.white)
+
+f_diagPage3C8(table t) =>
+    f_header(t, 8, "EXTENSION / CANDLE", "Trades | WR | PF")
+    f_pair(t, 8, 1, "Ext9 < .25 ATR", f_diagArrLine(diagExtT, diagExtW, diagExtGP, diagExtGL, 0), f_diagArrColor(diagExtT, diagExtW, diagExtGP, diagExtGL, 0))
+    f_pair(t, 8, 2, "Ext9 .25-.50", f_diagArrLine(diagExtT, diagExtW, diagExtGP, diagExtGL, 1), f_diagArrColor(diagExtT, diagExtW, diagExtGP, diagExtGL, 1))
+    f_pair(t, 8, 3, "Ext9 .50-.80", f_diagArrLine(diagExtT, diagExtW, diagExtGP, diagExtGL, 2), f_diagArrColor(diagExtT, diagExtW, diagExtGP, diagExtGL, 2))
+    f_pair(t, 8, 4, "Ext9 >= .80", f_diagArrLine(diagExtT, diagExtW, diagExtGP, diagExtGL, 3), f_diagArrColor(diagExtT, diagExtW, diagExtGP, diagExtGL, 3))
+    f_pair(t, 8, 5, "VWAP dist < .15", f_diagArrLine(diagVWAPDistT, diagVWAPDistW, diagVWAPDistGP, diagVWAPDistGL, 0), f_diagArrColor(diagVWAPDistT, diagVWAPDistW, diagVWAPDistGP, diagVWAPDistGL, 0))
+    f_pair(t, 8, 6, "VWAP .15-.30", f_diagArrLine(diagVWAPDistT, diagVWAPDistW, diagVWAPDistGP, diagVWAPDistGL, 1), f_diagArrColor(diagVWAPDistT, diagVWAPDistW, diagVWAPDistGP, diagVWAPDistGL, 1))
+    f_pair(t, 8, 7, "VWAP .30-.60", f_diagArrLine(diagVWAPDistT, diagVWAPDistW, diagVWAPDistGP, diagVWAPDistGL, 2), f_diagArrColor(diagVWAPDistT, diagVWAPDistW, diagVWAPDistGP, diagVWAPDistGL, 2))
+    f_pair(t, 8, 8, "VWAP >= .60", f_diagArrLine(diagVWAPDistT, diagVWAPDistW, diagVWAPDistGP, diagVWAPDistGL, 3), f_diagArrColor(diagVWAPDistT, diagVWAPDistW, diagVWAPDistGP, diagVWAPDistGL, 3))
+    f_pair(t, 8, 10, "Body < .25 ATR", f_diagArrLine(diagBodyT, diagBodyW, diagBodyGP, diagBodyGL, 0), f_diagArrColor(diagBodyT, diagBodyW, diagBodyGP, diagBodyGL, 0))
+    f_pair(t, 8, 11, "Body .25-.40", f_diagArrLine(diagBodyT, diagBodyW, diagBodyGP, diagBodyGL, 1), f_diagArrColor(diagBodyT, diagBodyW, diagBodyGP, diagBodyGL, 1))
+    f_pair(t, 8, 12, "Body .40-.65", f_diagArrLine(diagBodyT, diagBodyW, diagBodyGP, diagBodyGL, 2), f_diagArrColor(diagBodyT, diagBodyW, diagBodyGP, diagBodyGL, 2))
+    f_pair(t, 8, 13, "Body >= .65", f_diagArrLine(diagBodyT, diagBodyW, diagBodyGP, diagBodyGL, 3), f_diagArrColor(diagBodyT, diagBodyW, diagBodyGP, diagBodyGL, 3))
+    f_pair(t, 8, 15, "Exhaust 0-1", f_diagArrLine(diagExhaustT, diagExhaustW, diagExhaustGP, diagExhaustGL, 0), f_diagArrColor(diagExhaustT, diagExhaustW, diagExhaustGP, diagExhaustGL, 0))
+    f_pair(t, 8, 16, "Exhaust 2-3", f_diagArrLine(diagExhaustT, diagExhaustW, diagExhaustGP, diagExhaustGL, 1), f_diagArrColor(diagExhaustT, diagExhaustW, diagExhaustGP, diagExhaustGL, 1))
+    f_pair(t, 8, 17, "Exhaust 4+", f_diagArrLine(diagExhaustT, diagExhaustW, diagExhaustGP, diagExhaustGL, 2), f_diagArrColor(diagExhaustT, diagExhaustW, diagExhaustGP, diagExhaustGL, 2))
+
+f_diagPage4C0(table t) =>
+    f_header(t, 0, "MOVE / PAYOFF", "Deep capture stats")
+    f_pair(t, 0, 1, "Avg MFE ATR", researchTrades > 0 ? str.tostring(avgMFEATRAll, "#.3") : "-", color.white)
+    f_pair(t, 0, 2, "Avg MAE ATR", researchTrades > 0 ? str.tostring(avgMAEATRAll, "#.3") : "-", color.white)
+    f_pair(t, 0, 3, "Winner MFE ATR", researchWinners > 0 ? str.tostring(avgWinnerMFEATR, "#.3") : "-", color.lime)
+    f_pair(t, 0, 4, "Winner MAE ATR", researchWinners > 0 ? str.tostring(avgWinnerMAEATR, "#.3") : "-", color.white)
+    f_pair(t, 0, 5, "Loser MFE ATR", diagLosers > 0 ? str.tostring(avgLoserMFEATR, "#.3") : "-", color.orange)
+    f_pair(t, 0, 6, "Loser MAE ATR", diagLosers > 0 ? str.tostring(avgLoserMAEATR, "#.3") : "-", color.orange)
+    f_pair(t, 0, 7, "Avg R / Trade", researchTrades > 0 ? str.tostring(avgRealizedRAll, "#.3") : "-", avgRealizedRAll > 0 ? color.lime : color.orange)
+    f_pair(t, 0, 8, "Avg Win R", researchWinners > 0 ? str.tostring(avgWinnerR, "#.3") : "-", color.lime)
+    f_pair(t, 0, 9, "Avg Loss R", diagLosers > 0 ? str.tostring(avgLoserR, "#.3") : "-", color.orange)
+    f_pair(t, 0, 10, "Avg Capture", researchTrades > 0 ? str.tostring(avgCapturePct, "#.1") + "%" : "-", color.white)
+    f_pair(t, 0, 11, "Winner Capture", researchWinners > 0 ? str.tostring(avgWinnerCapturePct, "#.1") + "%" : "-", color.white)
+    f_pair(t, 0, 12, "Dir Hit Giveback", researchDirHits > 0 ? str.tostring(avgDirHitGivebackPct, "#.1") + "%" : "-", color.orange)
+    f_pair(t, 0, 13, "Dir Hit -> Win", researchDirHits > 0 ? str.tostring(dirHitToWinPct, "#.1") + "%" : "-", color.white)
+    f_pair(t, 0, 14, "Avg Winner Time", researchWinners > 0 ? str.tostring(avgWinnerTime, "#.1") + "m" : "-", color.lime)
+    f_pair(t, 0, 15, "Avg Loser Time", diagLosers > 0 ? str.tostring(avgLoserTime, "#.1") + "m" : "-", color.orange)
+    f_pair(t, 0, 17, "Diag Page", "4 / 5", color.aqua)
+
+f_diagPage4C2(table t) =>
+    f_header(t, 2, "MFE / MAE COHORTS", "Trades | WR | PF")
+    f_pair(t, 2, 1, "MFE >= .15", f_diagArrLine(diagMFET, diagMFEW, diagMFEGP, diagMFEGL, 0), f_diagArrColor(diagMFET, diagMFEW, diagMFEGP, diagMFEGL, 0))
+    f_pair(t, 2, 2, "MFE >= .30", f_diagArrLine(diagMFET, diagMFEW, diagMFEGP, diagMFEGL, 1), f_diagArrColor(diagMFET, diagMFEW, diagMFEGP, diagMFEGL, 1))
+    f_pair(t, 2, 3, "MFE >= .50", f_diagArrLine(diagMFET, diagMFEW, diagMFEGP, diagMFEGL, 2), f_diagArrColor(diagMFET, diagMFEW, diagMFEGP, diagMFEGL, 2))
+    f_pair(t, 2, 4, "MFE >= .75", f_diagArrLine(diagMFET, diagMFEW, diagMFEGP, diagMFEGL, 3), f_diagArrColor(diagMFET, diagMFEW, diagMFEGP, diagMFEGL, 3))
+    f_pair(t, 2, 5, "MFE >= 1.00", f_diagArrLine(diagMFET, diagMFEW, diagMFEGP, diagMFEGL, 4), f_diagArrColor(diagMFET, diagMFEW, diagMFEGP, diagMFEGL, 4))
+    f_pair(t, 2, 7, "MAE < .15", f_diagArrLine(diagMAET, diagMAEW, diagMAEGP, diagMAEGL, 0), f_diagArrColor(diagMAET, diagMAEW, diagMAEGP, diagMAEGL, 0))
+    f_pair(t, 2, 8, "MAE .15-.30", f_diagArrLine(diagMAET, diagMAEW, diagMAEGP, diagMAEGL, 1), f_diagArrColor(diagMAET, diagMAEW, diagMAEGP, diagMAEGL, 1))
+    f_pair(t, 2, 9, "MAE .30-.50", f_diagArrLine(diagMAET, diagMAEW, diagMAEGP, diagMAEGL, 2), f_diagArrColor(diagMAET, diagMAEW, diagMAEGP, diagMAEGL, 2))
+    f_pair(t, 2, 10, "MAE >= .50", f_diagArrLine(diagMAET, diagMAEW, diagMAEGP, diagMAEGL, 3), f_diagArrColor(diagMAET, diagMAEW, diagMAEGP, diagMAEGL, 3))
+    f_pair(t, 2, 12, "< 5 min", f_diagArrLine(diagDurationT, diagDurationW, diagDurationGP, diagDurationGL, 0), f_diagArrColor(diagDurationT, diagDurationW, diagDurationGP, diagDurationGL, 0))
+    f_pair(t, 2, 13, "5-10 min", f_diagArrLine(diagDurationT, diagDurationW, diagDurationGP, diagDurationGL, 1), f_diagArrColor(diagDurationT, diagDurationW, diagDurationGP, diagDurationGL, 1))
+    f_pair(t, 2, 14, "10-20 min", f_diagArrLine(diagDurationT, diagDurationW, diagDurationGP, diagDurationGL, 2), f_diagArrColor(diagDurationT, diagDurationW, diagDurationGP, diagDurationGL, 2))
+    f_pair(t, 2, 15, ">= 20 min", f_diagArrLine(diagDurationT, diagDurationW, diagDurationGP, diagDurationGL, 3), f_diagArrColor(diagDurationT, diagDurationW, diagDurationGP, diagDurationGL, 3))
+
+f_diagPage4C4(table t) =>
+    f_header(t, 4, "EXIT REASONS A", "Trades | WR | PF")
+    f_pair(t, 4, 1, "TARGET", f_diagArrLine(diagExitT, diagExitW, diagExitGP, diagExitGL, 0), f_diagArrColor(diagExitT, diagExitW, diagExitGP, diagExitGL, 0))
+    f_pair(t, 4, 2, "HARD STOP", f_diagArrLine(diagExitT, diagExitW, diagExitGP, diagExitGL, 1), f_diagArrColor(diagExitT, diagExitW, diagExitGP, diagExitGL, 1))
+    f_pair(t, 4, 3, "LOW-LOSS / ACTIVE", f_diagArrLine(diagExitT, diagExitW, diagExitGP, diagExitGL, 2), f_diagArrColor(diagExitT, diagExitW, diagExitGP, diagExitGL, 2))
+    f_pair(t, 4, 4, "PROFIT STOP", f_diagArrLine(diagExitT, diagExitW, diagExitGP, diagExitGL, 3), f_diagArrColor(diagExitT, diagExitW, diagExitGP, diagExitGL, 3))
+    f_pair(t, 4, 5, "REVERSAL BANK", f_diagArrLine(diagExitT, diagExitW, diagExitGP, diagExitGL, 4), f_diagArrColor(diagExitT, diagExitW, diagExitGP, diagExitGL, 4))
+    f_pair(t, 4, 6, "HEALTH BANK", f_diagArrLine(diagExitT, diagExitW, diagExitGP, diagExitGL, 5), f_diagArrColor(diagExitT, diagExitW, diagExitGP, diagExitGL, 5))
+    f_pair(t, 4, 7, "IMPULSE BANK", f_diagArrLine(diagExitT, diagExitW, diagExitGP, diagExitGL, 6), f_diagArrColor(diagExitT, diagExitW, diagExitGP, diagExitGL, 6))
+    f_pair(t, 4, 8, "RUNNER EXHAUST", f_diagArrLine(diagExitT, diagExitW, diagExitGP, diagExitGL, 7), f_diagArrColor(diagExitT, diagExitW, diagExitGP, diagExitGL, 7))
+    f_pair(t, 4, 11, "Question", "Which exits print edge?", color.aqua)
+    f_pair(t, 4, 12, "Bad exit", "PF < 1 = suspect", color.orange)
+
+f_diagPage4C6(table t) =>
+    f_header(t, 6, "EXIT REASONS B", "Trades | WR | PF")
+    f_pair(t, 6, 1, "PEAK GIVEBACK", f_diagArrLine(diagExitT, diagExitW, diagExitGP, diagExitGL, 8), f_diagArrColor(diagExitT, diagExitW, diagExitGP, diagExitGL, 8))
+    f_pair(t, 6, 2, "STALL BANK", f_diagArrLine(diagExitT, diagExitW, diagExitGP, diagExitGL, 9), f_diagArrColor(diagExitT, diagExitW, diagExitGP, diagExitGL, 9))
+    f_pair(t, 6, 3, "FAST FAILURE", f_diagArrLine(diagExitT, diagExitW, diagExitGP, diagExitGL, 10), f_diagArrColor(diagExitT, diagExitW, diagExitGP, diagExitGL, 10))
+    f_pair(t, 6, 4, "NO MOVE / CHOP", f_diagArrLine(diagExitT, diagExitW, diagExitGP, diagExitGL, 11), f_diagArrColor(diagExitT, diagExitW, diagExitGP, diagExitGL, 11))
+    f_pair(t, 6, 5, "MOVE TOO SLOW", f_diagArrLine(diagExitT, diagExitW, diagExitGP, diagExitGL, 12), f_diagArrColor(diagExitT, diagExitW, diagExitGP, diagExitGL, 12))
+    f_pair(t, 6, 6, "DIRECTION FLIP", f_diagArrLine(diagExitT, diagExitW, diagExitGP, diagExitGL, 13), f_diagArrColor(diagExitT, diagExitW, diagExitGP, diagExitGL, 13))
+    f_pair(t, 6, 7, "TIME / SESSION", f_diagArrLine(diagExitT, diagExitW, diagExitGP, diagExitGL, 14), f_diagArrColor(diagExitT, diagExitW, diagExitGP, diagExitGL, 14))
+    f_pair(t, 6, 8, "SAME BAR / OTHER", f_diagArrLine(diagExitT, diagExitW, diagExitGP, diagExitGL, 15), f_diagArrColor(diagExitT, diagExitW, diagExitGP, diagExitGL, 15))
+
+f_diagPage4C8(table t) =>
+    f_header(t, 8, "DAMAGE / SALVAGE", "Counts / clues")
+    f_pair(t, 8, 1, "Loss after .15 MFE", str.tostring(diagLossAfterMFE15), diagLossAfterMFE15 > 0 ? color.orange : color.white)
+    f_pair(t, 8, 2, "Loss after .30 MFE", str.tostring(diagLossAfterMFE30), diagLossAfterMFE30 > 0 ? color.orange : color.white)
+    f_pair(t, 8, 3, "Loss after .50 MFE", str.tostring(diagLossAfterMFE50), diagLossAfterMFE50 > 0 ? color.orange : color.white)
+    f_pair(t, 8, 4, "Loss after .75 MFE", str.tostring(diagLossAfterMFE75), diagLossAfterMFE75 > 0 ? color.orange : color.white)
+    f_pair(t, 8, 5, "Loss after 1.0 MFE", str.tostring(diagLossAfterMFE100), diagLossAfterMFE100 > 0 ? color.red : color.white)
+    f_pair(t, 8, 7, "Winner cap < 25%", str.tostring(diagWinnerCaptureUnder25), diagWinnerCaptureUnder25 > 0 ? color.orange : color.white)
+    f_pair(t, 8, 8, "Winner cap < 50%", str.tostring(diagWinnerCaptureUnder50), diagWinnerCaptureUnder50 > 0 ? color.orange : color.white)
+    f_pair(t, 8, 9, "Winner cap >= 75%", str.tostring(diagWinnerCaptureOver75), color.lime)
+    f_pair(t, 8, 11, "Low-loss armed", f_diagArrLine(diagMgmtT, diagMgmtW, diagMgmtGP, diagMgmtGL, 0), f_diagArrColor(diagMgmtT, diagMgmtW, diagMgmtGP, diagMgmtGL, 0))
+    f_pair(t, 8, 12, "Profit floor", f_diagArrLine(diagMgmtT, diagMgmtW, diagMgmtGP, diagMgmtGL, 1), f_diagArrColor(diagMgmtT, diagMgmtW, diagMgmtGP, diagMgmtGL, 1))
+    f_pair(t, 8, 13, "Strong floor", f_diagArrLine(diagMgmtT, diagMgmtW, diagMgmtGP, diagMgmtGL, 2), f_diagArrColor(diagMgmtT, diagMgmtW, diagMgmtGP, diagMgmtGL, 2))
+    f_pair(t, 8, 14, "Runner", f_diagArrLine(diagMgmtT, diagMgmtW, diagMgmtGP, diagMgmtGL, 3), f_diagArrColor(diagMgmtT, diagMgmtW, diagMgmtGP, diagMgmtGL, 3))
+    f_pair(t, 8, 15, "Target extension", f_diagArrLine(diagMgmtT, diagMgmtW, diagMgmtGP, diagMgmtGL, 4), f_diagArrColor(diagMgmtT, diagMgmtW, diagMgmtGP, diagMgmtGL, 4))
+
+f_diagPage5C0(table t) =>
+    f_header(t, 0, "LONG FILTER PRESSURE", "Candidate veto hits")
+    f_pair(t, 0, 1, "Raw candidates", str.tostring(diagLongCandidates), color.white)
+    f_pair(t, 0, 2, "Accepted", str.tostring(diagLongAccepted), color.lime)
+    f_pair(t, 0, 3, "Acceptance", diagLongCandidates > 0 ? str.tostring(longAcceptPct, "#.1") + "%" : "-", color.white)
+    f_pair(t, 0, 4, "Cooldown", str.tostring(array.get(diagLongFilter, 0)), color.orange)
+    f_pair(t, 0, 5, "Same-dir reset", str.tostring(array.get(diagLongFilter, 1)), color.orange)
+    f_pair(t, 0, 6, "Context < 2", str.tostring(array.get(diagLongFilter, 2)), color.orange)
+    f_pair(t, 0, 7, "Low ATR regime", str.tostring(array.get(diagLongFilter, 3)), color.orange)
+    f_pair(t, 0, 8, "Low ADX", str.tostring(array.get(diagLongFilter, 4)), color.orange)
+    f_pair(t, 0, 9, "Low efficiency", str.tostring(array.get(diagLongFilter, 5)), color.orange)
+    f_pair(t, 0, 10, "Chop", str.tostring(array.get(diagLongFilter, 6)), color.orange)
+    f_pair(t, 0, 11, "Cross opposed", str.tostring(array.get(diagLongFilter, 7)), color.orange)
+    f_pair(t, 0, 12, "Sweep transition", str.tostring(array.get(diagLongFilter, 8)), color.orange)
+    f_pair(t, 0, 13, "Special quality", str.tostring(array.get(diagLongFilter, 9)), color.orange)
+    f_pair(t, 0, 14, "Late rules", str.tostring(array.get(diagLongFilter, 10)), color.orange)
+    f_pair(t, 0, 15, "Footprint veto", str.tostring(array.get(diagLongFilter, 11)), color.orange)
+    f_pair(t, 0, 16, "Lead gate", str.tostring(array.get(diagLongFilter, 12)), color.orange)
+    f_pair(t, 0, 17, "Reversal risk", str.tostring(array.get(diagLongFilter, 13)), color.orange)
+
+f_diagPage5C2(table t) =>
+    f_header(t, 2, "SHORT FILTER PRESSURE", "Candidate veto hits")
+    f_pair(t, 2, 1, "Raw candidates", str.tostring(diagShortCandidates), color.white)
+    f_pair(t, 2, 2, "Accepted", str.tostring(diagShortAccepted), color.lime)
+    f_pair(t, 2, 3, "Acceptance", diagShortCandidates > 0 ? str.tostring(shortAcceptPct, "#.1") + "%" : "-", color.white)
+    f_pair(t, 2, 4, "Cooldown", str.tostring(array.get(diagShortFilter, 0)), color.orange)
+    f_pair(t, 2, 5, "Same-dir reset", str.tostring(array.get(diagShortFilter, 1)), color.orange)
+    f_pair(t, 2, 6, "Context < 2", str.tostring(array.get(diagShortFilter, 2)), color.orange)
+    f_pair(t, 2, 7, "Low ATR regime", str.tostring(array.get(diagShortFilter, 3)), color.orange)
+    f_pair(t, 2, 8, "Low ADX", str.tostring(array.get(diagShortFilter, 4)), color.orange)
+    f_pair(t, 2, 9, "Low efficiency", str.tostring(array.get(diagShortFilter, 5)), color.orange)
+    f_pair(t, 2, 10, "Chop", str.tostring(array.get(diagShortFilter, 6)), color.orange)
+    f_pair(t, 2, 11, "Cross opposed", str.tostring(array.get(diagShortFilter, 7)), color.orange)
+    f_pair(t, 2, 12, "Sweep transition", str.tostring(array.get(diagShortFilter, 8)), color.orange)
+    f_pair(t, 2, 13, "Special quality", str.tostring(array.get(diagShortFilter, 9)), color.orange)
+    f_pair(t, 2, 14, "Late rules", str.tostring(array.get(diagShortFilter, 10)), color.orange)
+    f_pair(t, 2, 15, "Footprint veto", str.tostring(array.get(diagShortFilter, 11)), color.orange)
+    f_pair(t, 2, 16, "Lead gate", str.tostring(array.get(diagShortFilter, 12)), color.orange)
+    f_pair(t, 2, 17, "Reversal risk", str.tostring(array.get(diagShortFilter, 13)), color.orange)
+
+f_diagPage5C4(table t) =>
+    f_header(t, 4, "SPECIAL / OLD GATES", "Counts")
+    f_pair(t, 4, 1, "Long open chase", str.tostring(array.get(diagLongFilter, 14)), color.orange)
+    f_pair(t, 4, 2, "Long BO climax", str.tostring(array.get(diagLongFilter, 15)), color.orange)
+    f_pair(t, 4, 3, "Short open chase", str.tostring(array.get(diagShortFilter, 14)), color.orange)
+    f_pair(t, 4, 4, "Short BO climax", str.tostring(array.get(diagShortFilter, 15)), color.orange)
+    f_pair(t, 4, 5, "PUT side quality", str.tostring(array.get(diagShortFilter, 16)), color.orange)
+    f_pair(t, 4, 6, "PUT after 10", str.tostring(array.get(diagShortFilter, 17)), color.orange)
+    f_pair(t, 4, 8, "Old chase C/P", str.tostring(openingChaseCallBlocks) + " / " + str.tostring(openingChasePutBlocks), color.white)
+    f_pair(t, 4, 9, "Old climax C/P", str.tostring(firstHourClimaxCallBlocks) + " / " + str.tostring(firstHourClimaxPutBlocks), color.white)
+    f_pair(t, 4, 10, "PUT EMA blocks", str.tostring(putEMABlocks), color.white)
+    f_pair(t, 4, 11, "Early PUT BO blocks", str.tostring(earlyPutBreakoutBlocks), color.white)
+    f_pair(t, 4, 13, "Signal conflicts", str.tostring(diagSignalConflicts), diagSignalConflicts > 0 ? color.orange : color.white)
+
+f_diagPage5C6(table t) =>
+    f_header(t, 6, "RAW SETUP CANDIDATES", "Long / Short bars")
+    f_pair(t, 6, 1, "Opening Range BO", str.tostring(array.get(diagRawLongSetup, 0)) + " / " + str.tostring(array.get(diagRawShortSetup, 0)), color.white)
+    f_pair(t, 6, 2, "Breakout", str.tostring(array.get(diagRawLongSetup, 1)) + " / " + str.tostring(array.get(diagRawShortSetup, 1)), color.white)
+    f_pair(t, 6, 3, "Liquidity Rev", str.tostring(array.get(diagRawLongSetup, 2)) + " / " + str.tostring(array.get(diagRawShortSetup, 2)), color.white)
+    f_pair(t, 6, 4, "EMA Pullback", str.tostring(array.get(diagRawLongSetup, 3)) + " / " + str.tostring(array.get(diagRawShortSetup, 3)), color.white)
+    f_pair(t, 6, 5, "VWAP Reclaim", str.tostring(array.get(diagRawLongSetup, 4)) + " / " + str.tostring(array.get(diagRawShortSetup, 4)), color.white)
+    f_pair(t, 6, 6, "Early Continuation", str.tostring(array.get(diagRawLongSetup, 5)) + " / " + str.tostring(array.get(diagRawShortSetup, 5)), color.white)
+
+f_diagPage5C8(table t) =>
+    f_header(t, 8, "ENTRY CONVERSION", "What is choking?")
+    f_pair(t, 8, 1, "Long accepted", diagLongCandidates > 0 ? str.tostring(longAcceptPct, "#.1") + "%" : "-", color.white)
+    f_pair(t, 8, 2, "Short accepted", diagShortCandidates > 0 ? str.tostring(shortAcceptPct, "#.1") + "%" : "-", color.white)
+    f_pair(t, 8, 4, "CALL performance", f_diagLine(diagCallTrades, diagCallWins, diagCallGP, diagCallGL), f_diagColor(diagCallTrades, diagCallWins, diagCallGP, diagCallGL))
+    f_pair(t, 8, 5, "PUT performance", f_diagLine(diagPutTrades, diagPutWins, diagPutGP, diagPutGL), f_diagColor(diagPutTrades, diagPutWins, diagPutGP, diagPutGL))
+
+f_diagExtraC8(table t) =>
+    f_header(t, 8, "ENTRY RANGE / STATE", "Trades | WR | PF")
+    f_pair(t, 8, 1, "Range < .50 ATR", f_diagArrLine(diagRangeT, diagRangeW, diagRangeGP, diagRangeGL, 0), f_diagArrColor(diagRangeT, diagRangeW, diagRangeGP, diagRangeGL, 0))
+    f_pair(t, 8, 2, "Range .50-.80", f_diagArrLine(diagRangeT, diagRangeW, diagRangeGP, diagRangeGL, 1), f_diagArrColor(diagRangeT, diagRangeW, diagRangeGP, diagRangeGL, 1))
+    f_pair(t, 8, 3, "Range .80-1.20", f_diagArrLine(diagRangeT, diagRangeW, diagRangeGP, diagRangeGL, 2), f_diagArrColor(diagRangeT, diagRangeW, diagRangeGP, diagRangeGL, 2))
+    f_pair(t, 8, 4, "Range >= 1.20", f_diagArrLine(diagRangeT, diagRangeW, diagRangeGP, diagRangeGL, 3), f_diagArrColor(diagRangeT, diagRangeW, diagRangeGP, diagRangeGL, 3))
+    f_pair(t, 8, 6, "Entry CHOP", f_diagArrLine(diagStateT, diagStateW, diagStateGP, diagStateGL, 0), f_diagArrColor(diagStateT, diagStateW, diagStateGP, diagStateGL, 0))
+    f_pair(t, 8, 7, "Entry normal", f_diagArrLine(diagStateT, diagStateW, diagStateGP, diagStateGL, 1), f_diagArrColor(diagStateT, diagStateW, diagStateGP, diagStateGL, 1))
+    f_pair(t, 8, 8, "Entry strong trend", f_diagArrLine(diagStateT, diagStateW, diagStateGP, diagStateGL, 2), f_diagArrColor(diagStateT, diagStateW, diagStateGP, diagStateGL, 2))
+    f_pair(t, 8, 10, "A-tier", f_diagArrLine(diagTierT, diagTierW, diagTierGP, diagTierGL, 0), f_diagArrColor(diagTierT, diagTierW, diagTierGP, diagTierGL, 0))
+    f_pair(t, 8, 17, "v2.9 Raw A", str.tostring(diagV29RawA), color.white)
+    f_pair(t, 8, 18, "ATR dead-zone veto", str.tostring(diagV29ATRBlocked), diagV29ATRBlocked > 0 ? color.orange : color.white)
+    f_pair(t, 8, 19, "ATR rescued v2.10", str.tostring(diagV210ATRRescued), diagV210ATRRescued > 0 ? color.aqua : color.white)
+    f_pair(t, 8, 20, "High-eff veto", str.tostring(diagV29EffBlocked), diagV29EffBlocked > 0 ? color.orange : color.white)
+    f_pair(t, 8, 21, "Tiny-body veto", str.tostring(diagV29BodyBlocked), diagV29BodyBlocked > 0 ? color.orange : color.white)
+    f_pair(t, 8, 22, "v2.10 Accepted A", str.tostring(diagV29AcceptedA), color.aqua)
+
+f_diagExtraC10(table t) =>
+    f_header(t, 10, "CALL BY TIME", "Trades | WR | PF")
+    f_pair(t, 10, 1, "09:30-10:00", f_diagArrLine(diagSideTimeT, diagSideTimeW, diagSideTimeGP, diagSideTimeGL, 0), f_diagArrColor(diagSideTimeT, diagSideTimeW, diagSideTimeGP, diagSideTimeGL, 0))
+    f_pair(t, 10, 2, "10:00-11:00", f_diagArrLine(diagSideTimeT, diagSideTimeW, diagSideTimeGP, diagSideTimeGL, 1), f_diagArrColor(diagSideTimeT, diagSideTimeW, diagSideTimeGP, diagSideTimeGL, 1))
+    f_pair(t, 10, 3, "11:00-12:00", f_diagArrLine(diagSideTimeT, diagSideTimeW, diagSideTimeGP, diagSideTimeGL, 2), f_diagArrColor(diagSideTimeT, diagSideTimeW, diagSideTimeGP, diagSideTimeGL, 2))
+    f_pair(t, 10, 4, "12:00-13:00", f_diagArrLine(diagSideTimeT, diagSideTimeW, diagSideTimeGP, diagSideTimeGL, 3), f_diagArrColor(diagSideTimeT, diagSideTimeW, diagSideTimeGP, diagSideTimeGL, 3))
+    f_pair(t, 10, 5, "13:00-14:00", f_diagArrLine(diagSideTimeT, diagSideTimeW, diagSideTimeGP, diagSideTimeGL, 4), f_diagArrColor(diagSideTimeT, diagSideTimeW, diagSideTimeGP, diagSideTimeGL, 4))
+    f_pair(t, 10, 6, "14:00-15:00", f_diagArrLine(diagSideTimeT, diagSideTimeW, diagSideTimeGP, diagSideTimeGL, 5), f_diagArrColor(diagSideTimeT, diagSideTimeW, diagSideTimeGP, diagSideTimeGL, 5))
+    f_pair(t, 10, 7, "15:00-16:15", f_diagArrLine(diagSideTimeT, diagSideTimeW, diagSideTimeGP, diagSideTimeGL, 6), f_diagArrColor(diagSideTimeT, diagSideTimeW, diagSideTimeGP, diagSideTimeGL, 6))
+
+f_diagExtraC12(table t) =>
+    f_header(t, 12, "PUT BY TIME", "Trades | WR | PF")
+    f_pair(t, 12, 1, "09:30-10:00", f_diagArrLine(diagSideTimeT, diagSideTimeW, diagSideTimeGP, diagSideTimeGL, 7), f_diagArrColor(diagSideTimeT, diagSideTimeW, diagSideTimeGP, diagSideTimeGL, 7))
+    f_pair(t, 12, 2, "10:00-11:00", f_diagArrLine(diagSideTimeT, diagSideTimeW, diagSideTimeGP, diagSideTimeGL, 8), f_diagArrColor(diagSideTimeT, diagSideTimeW, diagSideTimeGP, diagSideTimeGL, 8))
+    f_pair(t, 12, 3, "11:00-12:00", f_diagArrLine(diagSideTimeT, diagSideTimeW, diagSideTimeGP, diagSideTimeGL, 9), f_diagArrColor(diagSideTimeT, diagSideTimeW, diagSideTimeGP, diagSideTimeGL, 9))
+    f_pair(t, 12, 4, "12:00-13:00", f_diagArrLine(diagSideTimeT, diagSideTimeW, diagSideTimeGP, diagSideTimeGL, 10), f_diagArrColor(diagSideTimeT, diagSideTimeW, diagSideTimeGP, diagSideTimeGL, 10))
+    f_pair(t, 12, 5, "13:00-14:00", f_diagArrLine(diagSideTimeT, diagSideTimeW, diagSideTimeGP, diagSideTimeGL, 11), f_diagArrColor(diagSideTimeT, diagSideTimeW, diagSideTimeGP, diagSideTimeGL, 11))
+    f_pair(t, 12, 6, "14:00-15:00", f_diagArrLine(diagSideTimeT, diagSideTimeW, diagSideTimeGP, diagSideTimeGL, 12), f_diagArrColor(diagSideTimeT, diagSideTimeW, diagSideTimeGP, diagSideTimeGL, 12))
+    f_pair(t, 12, 7, "15:00-16:15", f_diagArrLine(diagSideTimeT, diagSideTimeW, diagSideTimeGP, diagSideTimeGL, 13), f_diagArrColor(diagSideTimeT, diagSideTimeW, diagSideTimeGP, diagSideTimeGL, 13))
+
+f_diagExtraC14(table t) =>
+    f_header(t, 14, "CALL MFE COHORT", "Trades | WR | PF")
+    f_pair(t, 14, 1, "MFE >= .15", f_diagArrLine(diagSideMFET, diagSideMFEW, diagSideMFEGP, diagSideMFEGL, 0), f_diagArrColor(diagSideMFET, diagSideMFEW, diagSideMFEGP, diagSideMFEGL, 0))
+    f_pair(t, 14, 2, "MFE >= .30", f_diagArrLine(diagSideMFET, diagSideMFEW, diagSideMFEGP, diagSideMFEGL, 1), f_diagArrColor(diagSideMFET, diagSideMFEW, diagSideMFEGP, diagSideMFEGL, 1))
+    f_pair(t, 14, 3, "MFE >= .50", f_diagArrLine(diagSideMFET, diagSideMFEW, diagSideMFEGP, diagSideMFEGL, 2), f_diagArrColor(diagSideMFET, diagSideMFEW, diagSideMFEGP, diagSideMFEGL, 2))
+    f_pair(t, 14, 4, "MFE >= .75", f_diagArrLine(diagSideMFET, diagSideMFEW, diagSideMFEGP, diagSideMFEGL, 3), f_diagArrColor(diagSideMFET, diagSideMFEW, diagSideMFEGP, diagSideMFEGL, 3))
+    f_pair(t, 14, 5, "MFE >= 1.00", f_diagArrLine(diagSideMFET, diagSideMFEW, diagSideMFEGP, diagSideMFEGL, 4), f_diagArrColor(diagSideMFET, diagSideMFEW, diagSideMFEGP, diagSideMFEGL, 4))
+
+f_diagExtraC16(table t) =>
+    f_header(t, 16, "PUT MFE COHORT", "Trades | WR | PF")
+    f_pair(t, 16, 1, "MFE >= .15", f_diagArrLine(diagSideMFET, diagSideMFEW, diagSideMFEGP, diagSideMFEGL, 5), f_diagArrColor(diagSideMFET, diagSideMFEW, diagSideMFEGP, diagSideMFEGL, 5))
+    f_pair(t, 16, 2, "MFE >= .30", f_diagArrLine(diagSideMFET, diagSideMFEW, diagSideMFEGP, diagSideMFEGL, 6), f_diagArrColor(diagSideMFET, diagSideMFEW, diagSideMFEGP, diagSideMFEGL, 6))
+    f_pair(t, 16, 3, "MFE >= .50", f_diagArrLine(diagSideMFET, diagSideMFEW, diagSideMFEGP, diagSideMFEGL, 7), f_diagArrColor(diagSideMFET, diagSideMFEW, diagSideMFEGP, diagSideMFEGL, 7))
+    f_pair(t, 16, 4, "MFE >= .75", f_diagArrLine(diagSideMFET, diagSideMFEW, diagSideMFEGP, diagSideMFEGL, 8), f_diagArrColor(diagSideMFET, diagSideMFEW, diagSideMFEGP, diagSideMFEGL, 8))
+    f_pair(t, 16, 5, "MFE >= 1.00", f_diagArrLine(diagSideMFET, diagSideMFEW, diagSideMFEGP, diagSideMFEGL, 9), f_diagArrColor(diagSideMFET, diagSideMFEW, diagSideMFEGP, diagSideMFEGL, 9))
+
+f_diagExtraC18(table t) =>
+    f_header(t, 18, "SIDE GIVEBACK", "Counts / capture")
+    f_pair(t, 18, 1, "CALL loss after .30", str.tostring(diagCallLossAfterMFE30), diagCallLossAfterMFE30 > 0 ? color.orange : color.white)
+    f_pair(t, 18, 2, "CALL loss after .50", str.tostring(diagCallLossAfterMFE50), diagCallLossAfterMFE50 > 0 ? color.orange : color.white)
+    f_pair(t, 18, 3, "PUT loss after .30", str.tostring(diagPutLossAfterMFE30), diagPutLossAfterMFE30 > 0 ? color.orange : color.white)
+    f_pair(t, 18, 4, "PUT loss after .50", str.tostring(diagPutLossAfterMFE50), diagPutLossAfterMFE50 > 0 ? color.orange : color.white)
+    f_pair(t, 18, 6, "CALL winner capture", diagCallWins > 0 ? str.tostring(diagCallWinnerCaptureTotal / diagCallWins, "#.1") + "%" : "-", color.white)
+    f_pair(t, 18, 7, "PUT winner capture", diagPutWins > 0 ? str.tostring(diagPutWinnerCaptureTotal / diagPutWins, "#.1") + "%" : "-", color.white)
+
+var table dash = table.new(position.top_left, 20, 64, bgcolor = color.new(color.black, 8), border_width = 0)
+
+if barstate.islast and showTable
+    table.clear(dash, 0, 0, 19, 63)
+
+    diagRowOffset := 0
+    diagColOffset := -2
+    f_diagPage1C2(dash)
+    f_diagPage1C4(dash)
+    f_diagPage1C6(dash)
+    f_diagPage1C8(dash)
+
+    diagColOffset := 8
+    f_diagPage2C0(dash)
+    f_diagPage2C2(dash)
+    f_diagPage2C4(dash)
+    f_diagPage2C6(dash)
+    f_diagPage2C8(dash)
+
+    diagColOffset := 18
+    f_diagPage3C0(dash)
+
+    diagRowOffset := 18
+    diagColOffset := -2
+    f_diagPage3C2(dash)
+    f_diagPage3C4(dash)
+    f_diagPage3C6(dash)
+    f_diagPage3C8(dash)
+
+    diagColOffset := 8
+    f_diagPage4C0(dash)
+    f_diagPage4C2(dash)
+    f_diagPage4C4(dash)
+    f_diagPage4C6(dash)
+    f_diagPage4C8(dash)
+
+    diagColOffset := 18
+    f_diagPage5C0(dash)
+
+    diagRowOffset := 36
+    diagColOffset := -2
+    f_diagPage5C2(dash)
+    f_diagPage5C4(dash)
+    f_diagPage5C6(dash)
+    f_diagPage5C8(dash)
+
+    diagColOffset := 0
+    f_diagExtraC8(dash)
+    f_diagExtraC10(dash)
+    f_diagExtraC12(dash)
+    f_diagExtraC14(dash)
+    f_diagExtraC16(dash)
+    f_diagExtraC18(dash)
+
+    diagColOffset := 0
+    diagRowOffset := 0

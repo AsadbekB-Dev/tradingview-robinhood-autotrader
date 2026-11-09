@@ -1,0 +1,3404 @@
+//@version=6
+//@strategy_alert_message {{strategy.order.alert_message}} | TV_ORDER_ID {{strategy.order.id}} | TV_FILL {{strategy.order.price}}
+strategy("Option2 — QQQ Evolving Auction Interpreter v1.9.1 GLOBAL RENEWAL CLEAN", overlay=true,
+     pyramiding=0, initial_capital=100000,
+     default_qty_type=strategy.fixed, default_qty_value=1,
+     commission_type=strategy.commission.cash_per_contract, commission_value=0.0,
+     slippage=0, calc_on_every_tick=false, calc_on_order_fills=false,
+     process_orders_on_close=false, use_bar_magnifier=true,
+     max_labels_count=500, max_lines_count=80)
+string G_BUS = "1. Option1 Bus — connect matching plots"
+float busHeader = input.source(close, "BUS 1 — Map Header", group=G_BUS)
+float busR1 = input.source(close, "BUS 2 — Resistance 1 Center", group=G_BUS)
+float busR1Meta = input.source(close, "BUS 3 — Resistance 1 Meta", group=G_BUS)
+float busR2 = input.source(close, "BUS 4 — Resistance 2", group=G_BUS)
+float busS1 = input.source(close, "BUS 5 — Support 1 Center", group=G_BUS)
+float busS1Meta = input.source(close, "BUS 6 — Support 1 Meta", group=G_BUS)
+float busS2 = input.source(close, "BUS 7 — Support 2", group=G_BUS)
+float busBalHi = input.source(close, "BUS 8 — Current Balance High", group=G_BUS)
+float busBalLo = input.source(close, "BUS 9 — Current Balance Low", group=G_BUS)
+float busContext = input.source(close, "BUS 10 — Auction Context v3", group=G_BUS,
+     tooltip="Connect to Option1 BUS 10 — Auction Context v3. Telemetry only.")
+float busClock = input.source(close, "BUS 11 — Market Clock + Cross-Market", group=G_BUS,
+     tooltip="Connect to Option1 BUS 11 — Market Clock + Cross-Market. Telemetry only; v0.8 trade decisions remain frozen.")
+float busFpEyes = input.source(close, "BUS 12 — Footprint Eyes Context", group=G_BUS)
+float busFpPoc = input.source(close, "BUS 13 — Footprint POC", group=G_BUS)
+float busFpValue = input.source(close, "BUS 14 — Footprint Value Mid", group=G_BUS)
+float busRthVwap = input.source(close, "BUS 15 — RTH VWAP", group=G_BUS)
+string G_REASON = "2. Reasoning"
+int atrLen = input.int(14, "ATR length", 5, 50, group=G_REASON)
+int territoryLen = input.int(6, "Territory window", 3, 12, group=G_REASON)
+int contextLen = input.int(12, "Context window", 6, 30, group=G_REASON)
+int volLen = input.int(24, "Effort normalization", 10, 60, group=G_REASON)
+float zoneNearAtr = input.float(0.45, "Zone interaction distance · ATR", 0.15, 1.20, step=0.05, group=G_REASON)
+float territoryMinAtr = input.float(0.20, "Meaningful territory gain · ATR", 0.05, 0.60, step=0.05, group=G_REASON)
+float efficientMove = input.float(0.30, "Directional efficiency reference", 0.15, 0.60, step=0.02, group=G_REASON)
+float routeMinimumR = input.float(0.65, "Minimum usable route for ARM (R)", 0.25, 1.25, step=0.05, group=G_REASON)
+int armTriggerFreshBars = input.int(1, "ARM trigger freshness · bars", 1, 2, group=G_REASON,
+     tooltip="The thesis may persist, but one specific entry trigger is only valid for this many completed bars. Default 1 means: if it does not fill on the next bar, cancel that price and re-evaluate from current structure.")
+float stopBufferAtr = input.float(0.06, "Structural stop buffer · ATR", 0.02, 0.20, step=0.01, group=G_REASON)
+float shortMaturityRelVol = input.float(1.80, "Short move-maturity participation reference", 1.20, 3.00, step=0.05, group=G_REASON,
+     tooltip="Experimental reasoning guard from the 365-day audit. A FAILED-UP short is considered mature when buyers are already weak, downside progress is established, and participation is extreme. The bearish thesis remains alive, but Option2 waits for a pullback plus fresh seller response before ARM.")
+float shortParticipationMinRelVol = input.float(0.70, "Short minimum participation for ARM", 0.40, 1.20, step=0.05, group=G_REASON,
+     tooltip="Full-history reasoning check: bearish theses may keep developing below this participation level, but Bot2 will not ARM a short until relative volume recovers. This rule is intentionally short-side only.")
+bool enableCausalReset = input.bool(true, "Require fresh causal reset for contradicted FAILED-UP shorts", group=G_REASON,
+     tooltip="A FAILED-UP short cannot ARM while a prior DOWN shock is only stabilizing or while Option1 says R1 is accepted above. Option2 waits for a genuinely NEW bearish event after the contradiction instead of reusing the old seller story.")
+string G_STRAT = "3. Strategy / exits"
+bool enableEarlyExit = input.bool(true, "Allow thesis-failure early exits", group=G_STRAT)
+int minEarlyBars = input.int(2, "Minimum bars before early exit", 1, 8, group=G_STRAT)
+bool enableProvenProtection = input.bool(true, "v0.7 PROVEN CONTROL TRANSFER", group=G_STRAT)
+const float PROVEN_R = 0.50
+const float PROTECT_GIVEBACK_R = 0.30
+const float MEMORY_RECLAIM_FRAC = 0.75
+const float MEMORY_NEW_LOCATION_ATR = 0.75
+const int CT_UNPROVEN = 0
+const int CT_PROVEN = 1
+const int CT_CHALLENGED = 2
+const int CT_RECOVERING = 3
+const int CT_TRANSFER_BUILDING = 4
+const int CT_EVT_NONE = 0
+const int CT_EVT_STRUCTURE = 1
+const int CT_EVT_FAILED_AUCTION = 2
+const int CT_EVT_DRIVE = 3
+const int CT_EVT_EFFORT_RESULT = 4
+const int CT_EVT_RESPONSE = 5
+const int CT_EVT_RECOVERY = 6
+const int CT_EVT_RESPONSE_FAIL = 7
+const int CT_EVT_ACCEPTANCE = 8
+const int CT_EVT_CONTINUATION = 9
+const int CT_PATH_NONE = 0
+const int CT_PATH_NO_RESPONSE_RETENTION = 1
+const int CT_PATH_RESPONSE_FAILURE = 2
+int episodeResetBars = input.int(2, "Bars thesis must disappear before re-arm", 1, 6, group=G_STRAT)
+string G_QUICK = "4. QQQ options move-rider layer"
+float moveMilestonePts = input.float(1.00, "Meaningful QQQ move milestone · points", 0.50, 3.00, step=0.10, group=G_QUICK,
+     tooltip="Research/state milestone only. Reaching this price movement does NOT sell the trade.")
+float moveMinClearRoomPts = input.float(1.00, "Preferred clear route before ARM · points", 0.25, 3.00, step=0.10, group=G_QUICK,
+     tooltip="If a meaningful opposing Option1 zone sits closer than this, Option2 normally waits unless the auction is already proving a strong same-side expansion through structure.")
+float moveMinEfficiency = input.float(0.28, "Minimum directional efficiency for continuation", 0.10, 0.60, step=0.02, group=G_QUICK)
+float moveMinResult = input.float(0.14, "Minimum same-side result proof", 0.05, 0.50, step=0.01, group=G_QUICK)
+float moveMinParticipation = input.float(0.85, "Minimum same-time participation", 0.40, 1.50, step=0.05, group=G_QUICK,
+     tooltip="Uses Option1 same-weekday/same-time relative volume when available; otherwise falls back to local relative volume.")
+float moveMinRangePace = input.float(0.80, "Minimum same-time range pace", 0.40, 1.50, step=0.05, group=G_QUICK,
+     tooltip="Options entries still require a market that is actually moving for that time of day, but the trade itself has no fixed bar limit.")
+bool enableMoveExhaustionSell = input.bool(true, "SELL when directional move degrades into opposing balance/control", group=G_QUICK,
+     tooltip="No fixed timer. SELL requires market-behavior evidence: loss of same-side territory/result plus balance/chop or opposing sponsorship/counterattack.")
+string G_LIFE = "5. Move life / Auction Story / AMD"
+float fpStrongDeltaPct = input.float(0.10, "Brain · strong footprint delta fraction", 0.03, 0.40, step=0.01, group=G_LIFE)
+int fpStackMin = input.int(2, "Brain · stacked imbalance rows", 1, 6, group=G_LIFE)
+int storyQuietBars = input.int(4, "Story · bars without evidence before reset", 2, 10, group=G_LIFE)
+float storyEarlyAtr = input.float(0.85, "Story · EARLY distance from cause (ATR)", 0.35, 1.50, step=0.05, group=G_LIFE)
+float storyMatureAtr = input.float(1.90, "Story · MATURE distance from cause (ATR)", 1.00, 3.50, step=0.05, group=G_LIFE)
+float storyExhaustedAtr = input.float(3.10, "Story · EXHAUSTED distance from cause (ATR)", 1.75, 5.00, step=0.05, group=G_LIFE)
+float storyMinCapacityPts = input.float(0.90, "Story · reference remaining route (QQQ points)", 0.40, 2.50, step=0.05, group=G_LIFE)
+float payoffQuestionR = input.float(1.00, "Payoff question · desired causal R", 0.50, 2.00, step=0.05, group=G_LIFE,
+     tooltip="Uses the evolving story's causal invalidation, not the broad emergency stop. This is a prospective opportunity question, not a fixed take-profit.")
+float payoffMinMovePts = input.float(0.75, "Payoff question · minimum useful QQQ move", 0.25, 2.00, step=0.05, group=G_LIFE,
+     tooltip="Even when causal risk is tiny, an options entry should still have enough expected underlying displacement to matter.")
+float payoffInvalidBufferAtr = input.float(0.08, "Payoff question · causal invalidation buffer (ATR)", 0.02, 0.20, step=0.01, group=G_LIFE,
+     tooltip="Small buffer outside the story anchor or the most recent survived counterattack. It defines the question's causal risk; it does not replace the emergency structural stop.")
+int flowProofWindowBars = input.int(2, "Flow proof · max bars after base thesis is ready", 1, 4, group=G_LIFE)
+float flowMinDeltaFrac = input.float(0.03, "Flow proof · minimum meaningful delta fraction", 0.00, 0.15, step=0.01, group=G_LIFE)
+bool enableFlowExecutionStop = input.bool(true, "Use local flow-proof invalidation while trade is unproven", group=G_LIFE,
+     tooltip="Before the move proves itself, the entry timing is invalid if price breaks the local structure that created the accepted footprint proof. The broader thesis stop remains the emergency backstop.")
+bool enableDirectionalEpisodeMemory = input.bool(true, "v1.9.1 remember consumed directional episodes", group=G_LIFE,
+     tooltip="A same-side trade is not fresh merely because the local story reset. Freshness now requires a real balance/discovery reset or a meaningful challenge/reclaim; a new price location by itself is not enough.")
+bool enableResponsiveInitiativeReasoning = input.bool(true, "v1.9.1 defense must convert to initiative before DIRECT", group=G_LIFE,
+     tooltip="DEFENSE means the thesis survived, not that the defended side has initiated a new move. DIRECT participation from a defense story requires current initiative evidence such as acceptance/discovery or footprint initiative/drive.")
+bool enableUnknownFlowAwareness = input.bool(true, "v1.9.1 missing footprint = UNKNOWN for DIRECT", group=G_LIFE,
+     tooltip="When footprint data is unavailable, DIRECT entries are not allowed to pretend flow is confirmed. Meaningful RE-ACCEL remains eligible because its challenge/reclaim proof is structural. This is evidence-awareness, not a date filter.")
+int amdAccumBars = input.int(3, "AMD · minimum accumulation bars", 2, 10, group=G_LIFE)
+float amdMaxBalanceAtr = input.float(2.20, "AMD · maximum balance width in ATR", 0.75, 5.00, step=0.10, group=G_LIFE)
+int amdManipConfirmBars = input.int(5, "AMD · manipulation must resolve within bars", 2, 12, group=G_LIFE)
+int amdDistributionMaxBars = input.int(30, "AMD · max distribution memory bars", 8, 60, group=G_LIFE)
+float lifeProofPts = input.float(0.75, "Move life · meaningful proof points", 0.25, 1.50, step=0.05, group=G_LIFE)
+float lifeRunnerPts = input.float(1.75, "Move life · runner/mature distance", 0.75, 4.00, step=0.05, group=G_LIFE)
+float lifeMinBankPts = input.float(0.70, "Move life · minimum profit for reasoning bank", 0.25, 1.50, step=0.05, group=G_LIFE)
+int lifeEarlyFailBars = input.int(3, "Move life · failure-to-launch observation bars", 1, 8, group=G_LIFE)
+float lifeEarlyFailMaxMfePts = input.float(0.40, "Move life · max MFE for failure-to-launch", 0.15, 1.00, step=0.05, group=G_LIFE)
+float lifeWideGivebackPts = input.float(1.20, "Move life · EXPANDING max giveback", 0.50, 2.50, step=0.05, group=G_LIFE)
+float lifeHealthyGivebackPts = input.float(0.80, "Move life · HEALTHY max giveback", 0.30, 2.00, step=0.05, group=G_LIFE)
+float lifeMatureGivebackPts = input.float(0.55, "Move life · MATURE max giveback", 0.20, 1.50, step=0.05, group=G_LIFE)
+float lifeMinLockedPts = input.float(0.35, "Move life · minimum positive floor once proven", 0.05, 1.00, step=0.05, group=G_LIFE)
+int reentryWatchBars = input.int(12, "ENTER AGAIN watch window · bars", 4, 30, group=G_LIFE)
+float reentryTargetPts = input.float(1.00, "ENTER AGAIN hard objective · QQQ points", 0.50, 2.00, step=0.10, group=G_LIFE)
+float reentryMinClearRoomPts = input.float(1.25, "ENTER AGAIN minimum clear route · QQQ points", 1.00, 4.00, step=0.10, group=G_LIFE)
+float reentryMaxRiskPts = input.float(1.00, "ENTER AGAIN maximum structural risk · QQQ points", 0.30, 2.00, step=0.10, group=G_LIFE)
+bool enableDailyShield = input.bool(false, "Enable legacy daily execution shield", group=G_QUICK,
+     tooltip="Off by default for options research. Turn on only if you intentionally want the futures prop-style daily lockout behavior.")
+string TRADE_TZ = "America/Los_Angeles"
+string NO_TRADE_SESSION = "0000-0400:1234567"
+string PRE_RTH_TRANSITION = "0615-0630:1234567"
+string PRE_CLOSE_TRANSITION = "1245-1300:1234567"
+string LATE_RTH_RUNWAY = "1200-1245:1234567"
+string PROP_EXECUTION_SESSION = "0630-1300:1234567"
+string G_UI = "6. Display"
+bool showSignals = input.bool(true, "Show ARM / ENTER / EXIT markers", group=G_UI)
+bool showTradeGeometry = input.bool(true, "Show active ARM geometry", group=G_UI)
+int AUC_BALANCE = 1
+int AUC_BUILD = 2
+int AUC_TEST_UP = 3
+int AUC_TEST_DN = 4
+int AUC_FAIL_UP = 5
+int AUC_FAIL_DN = 6
+int AUC_EXP_UP = 7
+int AUC_EXP_DN = 8
+int AUC_CHOP = 9
+int AUC_TRANSITION = 10
+int Z_FRESH = 1
+int Z_TESTED = 2
+int Z_DEFENDED = 3
+int Z_ACCEPTED = 4
+int Z_WEAK = 5
+int Z_CONSUMED = 6
+int SIDE_NONE = 0
+int SIDE_LONG = 1
+int SIDE_SHORT = -1
+int LIFE_NONE = 0
+int LIFE_PROVING = 1
+int LIFE_EXPANDING = 2
+int LIFE_HEALTHY = 3
+int LIFE_MATURE = 4
+int LIFE_EXHAUSTING = 5
+int LIFE_TRANSFER = 6
+int AMD_NONE = 0
+int AMD_ACCUM = 1
+int AMD_MANIP_DN = 2
+int AMD_MANIP_UP = 3
+int AMD_DIST_UP = 4
+int AMD_DIST_DN = 5
+int STORY_NONE = 0
+int STORY_FORMING = 1
+int STORY_PROVING = 2
+int STORY_ACCEPTED = 3
+int STORY_CHALLENGED = 4
+int STORY_REACCEL = 5
+int STORY_FAILED = 6
+int STORY_CAUSE_NONE = 0
+int STORY_CAUSE_FAILED_AUCTION = 1
+int STORY_CAUSE_ACCEPTANCE = 2
+int STORY_CAUSE_DEFENSE = 3
+int STORY_CAUSE_DISCOVERY = 4
+int STORY_CAUSE_AMD = 5
+int STORY_CAUSE_CONTINUATION = 6
+int STORY_CAUSE_FAILED_CHALLENGE = 7
+int CHALLENGE_NONE = 0
+int CHALLENGE_WEAK = 1
+int CHALLENGE_MEANINGFUL = 2
+int CHALLENGE_STRONG = 3
+int STORY_STAGE_EARLY = 0
+int STORY_STAGE_HEALTHY = 1
+int STORY_STAGE_MATURE = 2
+int STORY_STAGE_EXHAUSTED = 3
+int PART_NONE = 0
+int PART_DIRECT = 1
+int PART_WAIT_PULLBACK = 2
+int PART_PULLBACK_HEALTHY = 3
+int PART_PULLBACK_DANGEROUS = 4
+int PART_REACCEL = 5
+int PART_WAIT_LEVEL = 6
+int ACT_WAIT = 0
+int ACT_WATCH_LONG = 1
+int ACT_WATCH_SHORT = -1
+int ACT_ARM_LONG = 2
+int ACT_ARM_SHORT = -2
+int ACT_ENTER_LONG = 3
+int ACT_ENTER_SHORT = -3
+int ACT_CANCEL = 4
+float tick = syminfo.mintick
+float atr = ta.atr(atrLen)
+float stopBuf = math.max(tick * 2.0, atr * stopBufferAtr)
+bool noTradeWindow = not na(time(timeframe.period, NO_TRADE_SESSION, TRADE_TZ))
+bool preBlackoutBar = not noTradeWindow and hour(time_close, TRADE_TZ) == 0 and minute(time_close, TRADE_TZ) == 0
+bool preRthTransition = not na(time(timeframe.period, PRE_RTH_TRANSITION, TRADE_TZ))
+bool preCloseTransition = not na(time(timeframe.period, PRE_CLOSE_TRANSITION, TRADE_TZ))
+bool preRthBoundaryBar = not preRthTransition and hour(time_close, TRADE_TZ) == 6 and minute(time_close, TRADE_TZ) == 15
+bool preCloseBoundaryBar = not preCloseTransition and hour(time_close, TRADE_TZ) == 12 and minute(time_close, TRADE_TZ) == 45
+bool sessionTransitionWindow = preRthTransition or preCloseTransition
+bool sessionTransitionBoundary = preRthBoundaryBar or preCloseBoundaryBar
+bool sessionEntryBlock = sessionTransitionWindow or sessionTransitionBoundary
+bool lateRthRunway = not na(time(timeframe.period, LATE_RTH_RUNWAY, TRADE_TZ))
+var float propDailyRealizedR = 0.0
+var int propDailyStops = 0
+var bool propShieldActive = false
+var int propDayStamp = na
+var int lastShieldClosedSeen = 0
+bool propExecutionWindow = not na(time(timeframe.period, PROP_EXECUTION_SESSION, TRADE_TZ))
+bool propExecutionEndBoundary =
+     hour(time_close, TRADE_TZ) == 13 and minute(time_close, TRADE_TZ) == 0
+bool entriesAllowedNow =
+     propExecutionWindow and
+     not propExecutionEndBoundary and
+     not noTradeWindow and
+     not preBlackoutBar and
+     not sessionEntryBlock and
+     not (enableDailyShield and propShieldActive)
+f_metaInt(float meta) =>
+    na(meta) ? 0 : int(math.floor(meta + 0.000001))
+f_metaStrength(float meta) =>
+    int(math.floor(f_metaInt(meta) / 1000000))
+f_metaState(float meta) =>
+    int(math.floor((f_metaInt(meta) % 1000000) / 10000))
+f_metaWidthTicks(float meta) =>
+    f_metaInt(meta) % 10000
+f_metaSource(float meta) =>
+    if na(meta)
+        0
+    else
+        int(math.round((meta - math.floor(meta)) * 100.0))
+f_metaValid(float meta) =>
+    if na(meta)
+        true
+    else
+        int stg = f_metaStrength(meta)
+        int st = f_metaState(meta)
+        int src = f_metaSource(meta)
+        stg >= 1 and stg <= 20 and st >= 1 and st <= 6 and src >= 1 and src <= 9
+int mapVersion = int(math.floor(busHeader))
+int auctionCode = int(math.round((busHeader - math.floor(busHeader)) * 100.0))
+bool headerValid = mapVersion >= 1 and auctionCode >= 1 and auctionCode <= 10
+int ctxWork = int(math.round(busContext))
+int weekdayCtx = ctxWork % 6
+ctxWork := int(math.floor(ctxWork / 6))
+int s1ReactionCtx = ctxWork % 10
+ctxWork := int(math.floor(ctxWork / 10))
+int r1ReactionCtx = ctxWork % 10
+ctxWork := int(math.floor(ctxWork / 10))
+int s1BattleCtx = ctxWork % 10
+ctxWork := int(math.floor(ctxWork / 10))
+int r1BattleCtx = ctxWork % 10
+ctxWork := int(math.floor(ctxWork / 10))
+int openingRangeCtx = ctxWork % 4
+ctxWork := int(math.floor(ctxWork / 4))
+int openingAuctionCtx = ctxWork % 8
+ctxWork := int(math.floor(ctxWork / 8))
+int gapCtx = ctxWork % 6
+ctxWork := int(math.floor(ctxWork / 6))
+int openLocationCtx = ctxWork % 6
+ctxWork := int(math.floor(ctxWork / 6))
+int shockExtremeAgeCtx = ctxWork % 10
+ctxWork := int(math.floor(ctxWork / 10))
+int shockRetraceCtx = ctxWork % 10
+ctxWork := int(math.floor(ctxWork / 10))
+int shockImpulseCtx = ctxWork % 10
+ctxWork := int(math.floor(ctxWork / 10))
+int shockAgeCtx = ctxWork % 10
+ctxWork := int(math.floor(ctxWork / 10))
+int shockEvidenceCtx = ctxWork % 8
+ctxWork := int(math.floor(ctxWork / 8))
+int shockDirCodeCtx = ctxWork % 3
+ctxWork := int(math.floor(ctxWork / 3))
+int shockStateCtx = ctxWork % 4
+ctxWork := int(math.floor(ctxWork / 4))
+int ctxPrefix = ctxWork
+bool ctxValid = ctxPrefix == 8
+int shockDirCtx = shockDirCodeCtx - 1
+int clkWork = int(math.round(busClock))
+int shockEpisodeCountCtx = clkWork % 10
+clkWork := int(math.floor(clkWork / 10))
+int vixMoveCtx = clkWork % 6
+clkWork := int(math.floor(clkWork / 6))
+int vixLevelCtx = clkWork % 4
+clkWork := int(math.floor(clkWork / 4))
+int esContextCtx = clkWork % 6
+clkWork := int(math.floor(clkWork / 6))
+int calendarCtx = clkWork % 3
+clkWork := int(math.floor(clkWork / 3))
+int rangePaceCodeCtx = clkWork % 32
+clkWork := int(math.floor(clkWork / 32))
+int volumePaceCodeCtx = clkWork % 32
+clkWork := int(math.floor(clkWork / 32))
+int timeEffCodeCtx = clkWork % 32
+clkWork := int(math.floor(clkWork / 32))
+int timeRangeCodeCtx = clkWork % 32
+clkWork := int(math.floor(clkWork / 32))
+int timeVolCodeCtx = clkWork % 32
+clkWork := int(math.floor(clkWork / 32))
+int clockReadyCodeCtx = clkWork % 2
+clkWork := int(math.floor(clkWork / 2))
+int rthSlotCtx = clkWork % 79
+clkWork := int(math.floor(clkWork / 79))
+int clockPrefix = clkWork
+bool clockCtxValid = clockPrefix == 7
+bool clockReadyCtx = clockCtxValid and clockReadyCodeCtx == 1
+float timeRelVolCtx = float(timeVolCodeCtx) / 10.0
+float timeRelRangeCtx = float(timeRangeCodeCtx) / 10.0
+float timeRelEffCtx = float(timeEffCodeCtx) / 10.0
+float volumePaceCtx = float(volumePaceCodeCtx) / 10.0
+float rangePaceCtx = float(rangePaceCodeCtx) / 10.0
+int fpEyeWork = int(math.round(busFpEyes))
+int fpPocLocCode = fpEyeWork % 5
+fpEyeWork := int(math.floor(fpEyeWork / 5))
+int fpLowerDeltaSignCode = fpEyeWork % 3
+fpEyeWork := int(math.floor(fpEyeWork / 3))
+int fpUpperDeltaSignCode = fpEyeWork % 3
+fpEyeWork := int(math.floor(fpEyeWork / 3))
+int fpBuyerAbsFactCode = fpEyeWork % 2
+fpEyeWork := int(math.floor(fpEyeWork / 2))
+int fpSellerAbsFactCode = fpEyeWork % 2
+fpEyeWork := int(math.floor(fpEyeWork / 2))
+int fpSellImbCount = fpEyeWork % 8
+fpEyeWork := int(math.floor(fpEyeWork / 8))
+int fpBuyImbCount = fpEyeWork % 8
+fpEyeWork := int(math.floor(fpEyeWork / 8))
+int fpMaxSellStack = fpEyeWork % 8
+fpEyeWork := int(math.floor(fpEyeWork / 8))
+int fpMaxBuyStack = fpEyeWork % 8
+fpEyeWork := int(math.floor(fpEyeWork / 8))
+int fpValueMigCode = fpEyeWork % 3
+fpEyeWork := int(math.floor(fpEyeWork / 3))
+int fpPocMigCode = fpEyeWork % 3
+fpEyeWork := int(math.floor(fpEyeWork / 3))
+int fpDeltaCode = fpEyeWork % 21
+fpEyeWork := int(math.floor(fpEyeWork / 21))
+int fpHasCode = fpEyeWork % 2
+fpEyeWork := int(math.floor(fpEyeWork / 2))
+int fpEyePrefix = fpEyeWork
+bool fpEyesValid = fpEyePrefix == 21
+bool fpHas = fpEyesValid and fpHasCode == 1 and not na(busFpPoc) and not na(busFpValue)
+float fpDeltaPct = fpHas ? float(fpDeltaCode - 10) * 0.05 : na
+float fpPocMid = fpHas ? busFpPoc : na
+float fpValueMid = fpHas ? busFpValue : na
+float fpUpperDelta = fpUpperDeltaSignCode == 2 ? 1.0 : fpUpperDeltaSignCode == 0 ? -1.0 : 0.0
+float fpLowerDelta = fpLowerDeltaSignCode == 2 ? 1.0 : fpLowerDeltaSignCode == 0 ? -1.0 : 0.0
+bool fpSellerAbsorptionFact = fpHas and fpSellerAbsFactCode == 1
+bool fpBuyerAbsorptionFact = fpHas and fpBuyerAbsFactCode == 1
+bool busValid = headerValid and f_metaValid(busR1Meta) and f_metaValid(busS1Meta) and ctxValid and clockCtxValid and fpEyesValid
+int rStrength = f_metaStrength(busR1Meta)
+int rState = f_metaState(busR1Meta)
+int rSource = f_metaSource(busR1Meta)
+float rHalf = f_metaWidthTicks(busR1Meta) * tick
+float rLo = na(busR1) or na(busR1Meta) ? na : busR1 - rHalf
+float rHi = na(busR1) or na(busR1Meta) ? na : busR1 + rHalf
+int sStrength = f_metaStrength(busS1Meta)
+int sState = f_metaState(busS1Meta)
+int sSource = f_metaSource(busS1Meta)
+float sHalf = f_metaWidthTicks(busS1Meta) * tick
+float sLo = na(busS1) or na(busS1Meta) ? na : busS1 - sHalf
+float sHi = na(busS1) or na(busS1Meta) ? na : busS1 + sHalf
+float ch = close - close[1]
+float upStep = math.max(ch, 0.0)
+float dnStep = math.max(-ch, 0.0)
+float upTravel = math.sum(upStep, territoryLen)
+float dnTravel = math.sum(dnStep, territoryLen)
+float totalTravel = upTravel + dnTravel
+float netMove = close - close[territoryLen]
+float territoryEfficiency = totalTravel > tick ? math.abs(netMove) / totalTravel : 0.0
+float buyerTravelShare = totalTravel > tick ? upTravel / totalTravel : 0.5
+float contextHi = ta.highest(high, contextLen)
+float contextLo = ta.lowest(low, contextLen)
+float contextRange = math.max(contextHi - contextLo, tick)
+float rangePosition = (close - contextLo) / contextRange
+bool upTerritory = netMove >= atr * territoryMinAtr and buyerTravelShare >= 0.56
+bool dnTerritory = netMove <= -atr * territoryMinAtr and buyerTravelShare <= 0.44
+bool upHolding = not upTerritory and netMove >= 0 and rangePosition >= 0.62 and buyerTravelShare >= 0.51
+bool dnHolding = not dnTerritory and netMove <= 0 and rangePosition <= 0.38 and buyerTravelShare <= 0.49
+string territoryText = upTerritory ? "BUYERS GAINING" :
+     dnTerritory ? "SELLERS GAINING" :
+     upHolding ? "BUYERS HOLDING" :
+     dnHolding ? "SELLERS HOLDING" : "CONTESTED"
+float barRange = math.max(high - low, tick)
+float closeLocation = ((close - low) - (high - close)) / barRange // -1..+1
+float avgVol = ta.sma(volume, volLen)
+float relVol = avgVol > 0 ? volume / avgVol : 1.0
+bool shortParticipationReady = relVol >= shortParticipationMinRelVol
+float signedEffort = closeLocation * relVol
+float effort3 = ta.ema(signedEffort, 3)
+float emaChange3 = ta.ema(close - close[1], 3)
+float result3 = atr > tick ? emaChange3 / atr : 0.0
+float highProgress3 = atr > tick ? math.max(high - high[3], 0.0) / atr : 0.0
+float lowProgress3 = atr > tick ? math.max(low[3] - low, 0.0) / atr : 0.0
+float buyerEffort = math.max(effort3, 0.0)
+float sellerEffort = math.max(-effort3, 0.0)
+float buyerResult = math.max(result3, 0.0) + highProgress3 * 0.35
+float sellerResult = math.max(-result3, 0.0) + lowProgress3 * 0.35
+bool buyerPoorResult = buyerEffort >= 0.45 and buyerResult < 0.14
+bool sellerPoorResult = sellerEffort >= 0.45 and sellerResult < 0.14
+bool buyerSponsored = buyerEffort >= 0.25 and buyerResult >= 0.18
+bool sellerSponsored = sellerEffort >= 0.25 and sellerResult >= 0.18
+float counterRatio = dnTravel > tick ? upTravel / dnTravel : upTravel > tick ? 10.0 : 1.0
+bool sellerCounterWeak = counterRatio >= 1.55
+bool buyerCounterWeak = counterRatio <= 0.645
+string counterText = sellerCounterWeak ? "SELLER RESPONSE WEAK" :
+     buyerCounterWeak ? "BUYER RESPONSE WEAK" : "TWO-WAY RESPONSE"
+bool downsideAlreadyEstablished =
+     dnTerritory or
+     (sellerResult >= 0.40 and sellerEffort >= 0.30)
+float nearDist = atr * zoneNearAtr
+bool nearR = not na(busR1) and math.abs(close - busR1) <= nearDist
+bool nearS = not na(busS1) and math.abs(close - busS1) <= nearDist
+bool touchedR = not na(rLo) and high >= rLo and low <= rHi
+bool touchedS = not na(sLo) and high >= sLo and low <= sHi
+bool acceptedAboveR = not na(rHi) and close > rHi and close[1] > rHi
+bool acceptedBelowS = not na(sLo) and close < sLo and close[1] < sLo
+bool rejectedAtR = not na(rLo) and high >= rLo and close < rLo and close < open
+bool rejectedAtS = not na(sHi) and low <= sHi and close > sHi and close > open
+bool sweptRFailed = not na(rHi) and high > rHi and close < rLo
+bool sweptSFailed = not na(sLo) and low < sLo and close > sHi
+bool balanceBreakUp = not na(busBalHi) and close > busBalHi and close[1] <= busBalHi
+bool balanceBreakDn = not na(busBalLo) and close < busBalLo and close[1] >= busBalLo
+bool balanceReclaimUp = not na(busBalLo) and low < busBalLo and close > busBalLo
+bool balanceReclaimDn = not na(busBalHi) and high > busBalHi and close < busBalHi
+bool longDiscovery =
+     auctionCode == AUC_EXP_UP and
+     (upTerritory or upHolding) and
+     not buyerPoorResult
+bool longFailedDown =
+     auctionCode == AUC_FAIL_DN or
+     sweptSFailed or
+     balanceReclaimUp
+bool longSupportDefense =
+     touchedS and
+     (sState == Z_DEFENDED or sStrength >= 7) and
+     (rejectedAtS or sellerPoorResult) and
+     not dnTerritory
+bool longAcceptance =
+     acceptedAboveR and
+     (buyerSponsored or upTerritory) and
+     not sellerSponsored
+bool shortDiscovery =
+     auctionCode == AUC_EXP_DN and
+     (dnTerritory or dnHolding) and
+     not sellerPoorResult
+bool shortFailedUp =
+     auctionCode == AUC_FAIL_UP or
+     sweptRFailed or
+     balanceReclaimDn
+bool shortResistanceDefense =
+     touchedR and
+     (rState == Z_DEFENDED or rStrength >= 7) and
+     (rejectedAtR or buyerPoorResult) and
+     not upTerritory
+bool shortAcceptance =
+     acceptedBelowS and
+     (sellerSponsored or dnTerritory) and
+     not buyerSponsored
+bool shortMoveMatureNow =
+     shortFailedUp and
+     buyerCounterWeak and
+     downsideAlreadyEstablished and
+     relVol >= shortMaturityRelVol
+bool longReversalUnprovenNow =
+     longFailedDown and
+     auctionCode == AUC_TRANSITION and
+     dnTerritory
+bool shortReversalUnprovenNow =
+     shortFailedUp and
+     auctionCode == AUC_TRANSITION and
+     upTerritory
+bool lateFailedDownLong = longFailedDown and lateRthRunway
+bool lateLongRunwayProof =
+     auctionCode == AUC_EXP_UP or
+     longAcceptance or
+     (upTerritory and buyerResult >= 0.40 and not buyerPoorResult)
+bool longSessionRunwayReady =
+     not lateFailedDownLong or
+     lateLongRunwayProof
+bool bullSupported = longDiscovery or longFailedDown or longSupportDefense or longAcceptance
+bool bearSupported = shortDiscovery or shortFailedUp or shortResistanceDefense or shortAcceptance
+bool bullDeveloping =
+     bullSupported or
+     auctionCode == AUC_TEST_UP or
+     (nearS and not sellerSponsored) or
+     (upHolding and not nearR) or
+     (auctionCode == AUC_TRANSITION and upTerritory)
+bool bearDeveloping =
+     bearSupported or
+     auctionCode == AUC_TEST_DN or
+     (nearR and not buyerSponsored) or
+     (dnHolding and not nearS) or
+     (auctionCode == AUC_TRANSITION and dnTerritory)
+bool bullContradicted =
+     (acceptedBelowS and dnTerritory) or
+     (auctionCode == AUC_EXP_DN and sellerSponsored and dnTerritory) or
+     (nearR and sweptRFailed and bearSupported)
+bool bearContradicted =
+     (acceptedAboveR and upTerritory) or
+     (auctionCode == AUC_EXP_UP and buyerSponsored and upTerritory) or
+     (nearS and sweptSFailed and bullSupported)
+string longReason =
+     longFailedDown ? "FAILED DOWN / RECLAIM" :
+     longAcceptance ? "BREAK + ACCEPTANCE" :
+     longSupportDefense ? "SUPPORT DEFENSE" :
+     longDiscovery ? "UPWARD DISCOVERY" :
+     bullDeveloping ? "UP MOVE DEVELOPING" : "NONE"
+string shortReason =
+     shortFailedUp ? "FAILED UP / REJECTION" :
+     shortAcceptance ? "BREAKDOWN + ACCEPTANCE" :
+     shortResistanceDefense ? "RESISTANCE DEFENSE" :
+     shortDiscovery ? "DOWNWARD DISCOVERY" :
+     bearDeveloping ? "DOWN MOVE DEVELOPING" : "NONE"
+string thesisText = bullSupported and not bearSupported ? "BULL EXPLANATION LEADING" :
+     bearSupported and not bullSupported ? "BEAR EXPLANATION LEADING" :
+     bullSupported and bearSupported ? "COMPETING EXPLANATIONS" :
+     bullDeveloping and not bearDeveloping ? "BULL MOVE DEVELOPING" :
+     bearDeveloping and not bullDeveloping ? "BEAR MOVE DEVELOPING" :
+     bullDeveloping and bearDeveloping ? "BOTH SIDES ACTIVE" : "NO CLEAR ATTEMPT"
+string opponentText =
+     acceptedAboveR ? "SHORT THESIS UNDER PRESSURE" :
+     sweptRFailed ? "BREAKOUT LONGS VULNERABLE" :
+     acceptedBelowS ? "LONG THESIS UNDER PRESSURE" :
+     sweptSFailed ? "BREAKDOWN SHORTS VULNERABLE" :
+     nearR ? "SHORTS MAY DEFEND R1 / BUY STOPS ABOVE" :
+     nearS ? "LONGS MAY DEFEND S1 / SELL STOPS BELOW" :
+     "NO IMMEDIATE FORCED-FLOW ZONE"
+float recentLow = ta.lowest(low, 5)
+float recentHigh = ta.highest(high, 5)
+float longStop =
+     longAcceptance and not na(rLo) ? rLo - stopBuf :
+     (longSupportDefense or longFailedDown) and not na(sLo) ? math.min(sLo, recentLow) - stopBuf :
+     recentLow - stopBuf
+float shortStop =
+     shortAcceptance and not na(sHi) ? sHi + stopBuf :
+     (shortResistanceDefense or shortFailedUp) and not na(rHi) ? math.max(rHi, recentHigh) + stopBuf :
+     recentHigh + stopBuf
+float longRisk = math.max(close - longStop, tick)
+float shortRisk = math.max(shortStop - close, tick)
+float longDest = not na(busR1) and busR1 > close ? busR1 :
+     not na(busR2) and busR2 > close ? busR2 : na
+float shortDest = not na(busS1) and busS1 < close ? busS1 :
+     not na(busS2) and busS2 < close ? busS2 : na
+float longRoomR = not na(longDest) ? math.max(0.0, (longDest - close) / longRisk) : na
+float shortRoomR = not na(shortDest) ? math.max(0.0, (close - shortDest) / shortRisk) : na
+bool longRouteUsable = na(longRoomR) or longRoomR >= routeMinimumR
+bool shortRouteUsable = na(shortRoomR) or shortRoomR >= routeMinimumR
+float moveParticipation = clockReadyCtx ? timeRelVolCtx : relVol
+float moveRangePace = clockReadyCtx ? timeRelRangeCtx : (atr > tick ? barRange / atr : 1.0)
+bool moveEnvironmentReady =
+     moveParticipation >= moveMinParticipation and
+     moveRangePace >= moveMinRangePace
+bool longMoveProof =
+     longDiscovery ? (buyerResult >= moveMinResult and territoryEfficiency >= moveMinEfficiency and not buyerPoorResult) :
+     longFailedDown ? (close > open and buyerResult >= moveMinResult and (buyerSponsored or upTerritory or upHolding or sellerPoorResult)) :
+     longSupportDefense ? (close > open and buyerResult >= moveMinResult and (buyerSponsored or sellerPoorResult)) :
+     longAcceptance ? (buyerSponsored and buyerResult >= moveMinResult) : false
+bool shortMoveProof =
+     shortDiscovery ? (sellerResult >= moveMinResult and territoryEfficiency >= moveMinEfficiency and not sellerPoorResult) :
+     shortFailedUp ? (close < open and sellerResult >= moveMinResult and (sellerSponsored or dnTerritory or dnHolding or buyerPoorResult)) :
+     shortResistanceDefense ? (close < open and sellerResult >= moveMinResult and (sellerSponsored or buyerPoorResult)) :
+     shortAcceptance ? (sellerSponsored and sellerResult >= moveMinResult) : false
+float longMoveTrigger = high + tick
+float shortMoveTrigger = low - tick
+bool r1HardObstacle = not na(busR1) and busR1 > longMoveTrigger and
+     rState != Z_ACCEPTED and rState != Z_WEAK and rState != Z_CONSUMED and
+     (rState == Z_DEFENDED or rStrength >= 7)
+bool s1HardObstacle = not na(busS1) and busS1 < shortMoveTrigger and
+     sState != Z_ACCEPTED and sState != Z_WEAK and sState != Z_CONSUMED and
+     (sState == Z_DEFENDED or sStrength >= 7)
+float longMoveDest = r1HardObstacle ? busR1 :
+     (not na(busR2) and busR2 > longMoveTrigger ? busR2 : na)
+float shortMoveDest = s1HardObstacle ? busS1 :
+     (not na(busS2) and busS2 < shortMoveTrigger ? busS2 : na)
+float longMoveRoomPts = not na(longMoveDest) ? math.max(0.0, longMoveDest - longMoveTrigger) : na
+float shortMoveRoomPts = not na(shortMoveDest) ? math.max(0.0, shortMoveTrigger - shortMoveDest) : na
+bool longExpansionCanBreak =
+     auctionCode == AUC_EXP_UP and upTerritory and buyerResult >= 0.40 and
+     territoryEfficiency >= moveMinEfficiency and
+     moveParticipation >= 1.0 and moveRangePace >= 1.0
+bool shortExpansionCanBreak =
+     auctionCode == AUC_EXP_DN and dnTerritory and sellerResult >= 0.40 and
+     territoryEfficiency >= moveMinEfficiency and
+     moveParticipation >= 1.0 and moveRangePace >= 1.0
+bool longMovePotentialReady = na(longMoveRoomPts) or longMoveRoomPts >= moveMinClearRoomPts or longExpansionCanBreak
+bool shortMovePotentialReady = na(shortMoveRoomPts) or shortMoveRoomPts >= moveMinClearRoomPts or shortExpansionCanBreak
+bool fpPocUp = fpHas and fpPocMigCode == 2
+bool fpPocDown = fpHas and fpPocMigCode == 0
+bool fpValueUp = fpHas and fpValueMigCode == 2
+bool fpValueDown = fpHas and fpValueMigCode == 0
+bool fpBuyStacked = fpHas and fpMaxBuyStack >= fpStackMin
+bool fpSellStacked = fpHas and fpMaxSellStack >= fpStackMin
+bool fpAggBuy = fpHas and fpDeltaPct >= fpStrongDeltaPct
+bool fpAggSell = fpHas and fpDeltaPct <= -fpStrongDeltaPct
+bool fpSellerAbsorbed = fpHas and fpSellerAbsorptionFact and
+     (sellerPoorResult or rejectedAtS or sweptSFailed or closeLocation >= 0.20) and
+     not dnTerritory
+bool fpBuyerAbsorbed = fpHas and fpBuyerAbsorptionFact and
+     (buyerPoorResult or rejectedAtR or sweptRFailed or closeLocation <= -0.20) and
+     not upTerritory
+bool fpLongSupport = fpHas and not fpBuyerAbsorbed and
+     ((fpAggBuy and (fpPocUp or fpValueUp or fpBuyStacked or fpUpperDelta > 0)) or fpSellerAbsorbed)
+bool fpShortSupport = fpHas and not fpSellerAbsorbed and
+     ((fpAggSell and (fpPocDown or fpValueDown or fpSellStacked or fpLowerDelta < 0)) or fpBuyerAbsorbed)
+bool fpLongContradiction = fpHas and fpAggSell and fpPocDown and
+     (fpSellStacked or fpValueDown) and (dnTerritory or sellerSponsored)
+bool fpShortContradiction = fpHas and fpAggBuy and fpPocUp and
+     (fpBuyStacked or fpValueUp) and (upTerritory or buyerSponsored)
+bool fpLongConstructive = fpHas and not fpLongContradiction and fpPocUp and
+     (fpValueUp or fpBuyImbCount >= fpSellImbCount) and fpDeltaPct > -0.05
+bool fpShortConstructive = fpHas and not fpShortContradiction and fpPocDown and
+     (fpValueDown or fpSellImbCount >= fpBuyImbCount) and fpDeltaPct < 0.05
+bool fpLongExhaustion = fpHas and fpAggBuy and not fpPocUp and
+     (buyerPoorResult or rejectedAtR or closeLocation < 0.10) and
+     (nearR or fpBuyerAbsorbed or fpValueDown)
+bool fpShortExhaustion = fpHas and fpAggSell and not fpPocDown and
+     (sellerPoorResult or rejectedAtS or closeLocation > -0.10) and
+     (nearS or fpSellerAbsorbed or fpValueUp)
+var int amdState = AMD_NONE
+var int amdStateBar = na
+var int amdBalanceCount = 0
+var float amdRangeHi = na
+var float amdRangeLo = na
+var float amdManipExtreme = na
+bool amdBalanceNow =
+     (auctionCode == AUC_BALANCE or auctionCode == AUC_BUILD or auctionCode == AUC_CHOP) and
+     not na(busBalHi) and not na(busBalLo) and busBalHi > busBalLo and
+     (busBalHi - busBalLo) <= atr * amdMaxBalanceAtr
+amdBalanceCount := amdBalanceNow ? math.min(amdBalanceCount + 1, 99) : 0
+if amdBalanceCount >= amdAccumBars and
+     (amdState == AMD_NONE or amdState == AMD_ACCUM or
+      (amdState == AMD_DIST_UP and bar_index - amdStateBar > 4) or
+      (amdState == AMD_DIST_DN and bar_index - amdStateBar > 4))
+    amdState := AMD_ACCUM
+    amdStateBar := bar_index
+    amdRangeHi := busBalHi
+    amdRangeLo := busBalLo
+    amdManipExtreme := na
+else if amdState == AMD_ACCUM and amdBalanceNow
+    amdRangeHi := busBalHi
+    amdRangeLo := busBalLo
+bool amdSweepDown = amdState == AMD_ACCUM and not na(amdRangeLo) and
+     low < amdRangeLo and close > amdRangeLo and
+     (sweptSFailed or balanceReclaimUp or fpSellerAbsorbed or auctionCode == AUC_FAIL_DN)
+bool amdSweepUp = amdState == AMD_ACCUM and not na(amdRangeHi) and
+     high > amdRangeHi and close < amdRangeHi and
+     (sweptRFailed or balanceReclaimDn or fpBuyerAbsorbed or auctionCode == AUC_FAIL_UP)
+if amdSweepDown
+    amdState := AMD_MANIP_DN
+    amdStateBar := bar_index
+    amdManipExtreme := low
+else if amdSweepUp
+    amdState := AMD_MANIP_UP
+    amdStateBar := bar_index
+    amdManipExtreme := high
+else if amdState == AMD_MANIP_DN
+    bool manipFresh = bar_index - amdStateBar <= amdManipConfirmBars
+    bool distUpConfirmed = manipFresh and not bullContradicted and
+         (upTerritory or longAcceptance or auctionCode == AUC_EXP_UP or balanceBreakUp) and
+         (not fpHas or fpLongSupport or fpLongConstructive or fpSellerAbsorbed)
+    bool breakActuallyDn = not na(amdRangeLo) and close < amdRangeLo and
+         (dnTerritory or shortAcceptance) and (not fpHas or fpShortSupport)
+    if distUpConfirmed
+        amdState := AMD_DIST_UP
+        amdStateBar := bar_index
+    else if breakActuallyDn
+        amdState := AMD_DIST_DN
+        amdStateBar := bar_index
+    else if not manipFresh
+        amdState := AMD_NONE
+        amdStateBar := bar_index
+        amdRangeHi := na
+        amdRangeLo := na
+        amdManipExtreme := na
+else if amdState == AMD_MANIP_UP
+    bool manipFresh = bar_index - amdStateBar <= amdManipConfirmBars
+    bool distDnConfirmed = manipFresh and not bearContradicted and
+         (dnTerritory or shortAcceptance or auctionCode == AUC_EXP_DN or balanceBreakDn) and
+         (not fpHas or fpShortSupport or fpShortConstructive or fpBuyerAbsorbed)
+    bool breakActuallyUp = not na(amdRangeHi) and close > amdRangeHi and
+         (upTerritory or longAcceptance) and (not fpHas or fpLongSupport)
+    if distDnConfirmed
+        amdState := AMD_DIST_DN
+        amdStateBar := bar_index
+    else if breakActuallyUp
+        amdState := AMD_DIST_UP
+        amdStateBar := bar_index
+    else if not manipFresh
+        amdState := AMD_NONE
+        amdStateBar := bar_index
+        amdRangeHi := na
+        amdRangeLo := na
+        amdManipExtreme := na
+else if amdState == AMD_DIST_UP
+    if bullContradicted or (bar_index - amdStateBar > amdDistributionMaxBars)
+        amdState := AMD_NONE
+        amdStateBar := bar_index
+        amdRangeHi := na
+        amdRangeLo := na
+        amdManipExtreme := na
+else if amdState == AMD_DIST_DN
+    if bearContradicted or (bar_index - amdStateBar > amdDistributionMaxBars)
+        amdState := AMD_NONE
+        amdStateBar := bar_index
+        amdRangeHi := na
+        amdRangeLo := na
+        amdManipExtreme := na
+bool amdSupportsLong = amdState == AMD_MANIP_DN or amdState == AMD_DIST_UP
+bool amdSupportsShort = amdState == AMD_MANIP_UP or amdState == AMD_DIST_DN
+bool amdOpposesLong = amdState == AMD_DIST_DN
+bool amdOpposesShort = amdState == AMD_DIST_UP
+bool fpLongEffortRejected = fpHas and fpDeltaPct >= flowMinDeltaFrac and fpPocDown and
+     (fpValueDown or fpBuyStacked) and not fpSellerAbsorbed
+bool fpShortEffortRejected = fpHas and fpDeltaPct <= -flowMinDeltaFrac and fpPocUp and
+     (fpValueUp or fpSellStacked) and not fpBuyerAbsorbed
+bool fpLongAttempt = fpHas and not fpLongContradiction and
+     (fpAggBuy or fpBuyStacked or fpSellerAbsorbed or
+      (buyerSponsored and buyerResult >= moveMinResult))
+bool fpShortAttempt = fpHas and not fpShortContradiction and
+     (fpAggSell or fpSellStacked or fpBuyerAbsorbed or
+      (sellerSponsored and sellerResult >= moveMinResult))
+bool fpLongAcceptance = fpHas and not fpLongContradiction and not fpLongEffortRejected and
+     fpPocUp and
+     (fpValueUp or upTerritory or upHolding or acceptedAboveR) and
+     (close > close[1] or upTerritory or upHolding)
+bool fpShortAcceptance = fpHas and not fpShortContradiction and not fpShortEffortRejected and
+     fpPocDown and
+     (fpValueDown or dnTerritory or dnHolding or acceptedBelowS) and
+     (close < close[1] or dnTerritory or dnHolding)
+bool fpLongAbsorptionConfirm = fpHas and fpSellerAbsorbed[1] and fpLongAcceptance
+bool fpShortAbsorptionConfirm = fpHas and fpBuyerAbsorbed[1] and fpShortAcceptance
+bool fpLongInitiativeConfirm = fpHas and fpLongAttempt[1] and fpLongAcceptance
+bool fpShortInitiativeConfirm = fpHas and fpShortAttempt[1] and fpShortAcceptance
+bool fpLongImmediateDrive = fpHas and auctionCode == AUC_EXP_UP and
+     fpAggBuy and fpBuyStacked and fpPocUp and fpValueUp and
+     buyerResult >= 0.40 and upTerritory
+bool fpShortImmediateDrive = fpHas and auctionCode == AUC_EXP_DN and
+     fpAggSell and fpSellStacked and fpPocDown and fpValueDown and
+     sellerResult >= 0.40 and dnTerritory
+bool longFlowConfirmed = fpHas and
+     not amdOpposesLong and
+     (fpLongAbsorptionConfirm or fpLongInitiativeConfirm or fpLongImmediateDrive or
+      (amdState == AMD_DIST_UP and fpLongAcceptance))
+bool shortFlowConfirmed = fpHas and
+     not amdOpposesShort and
+     (fpShortAbsorptionConfirm or fpShortInitiativeConfirm or fpShortImmediateDrive or
+      (amdState == AMD_DIST_DN and fpShortAcceptance))
+bool longFlowUnknown = not fpHas
+bool shortFlowUnknown = not fpHas
+bool longFlowRejected = fpHas and (fpLongContradiction or fpLongEffortRejected or amdOpposesLong)
+bool shortFlowRejected = fpHas and (fpShortContradiction or fpShortEffortRejected or amdOpposesShort)
+bool longOptionsBase = longMoveProof and moveEnvironmentReady and longMovePotentialReady
+bool shortOptionsBase = shortMoveProof and moveEnvironmentReady and shortMovePotentialReady
+bool longOptionsSuitable = longOptionsBase and longFlowConfirmed
+bool shortOptionsSuitable = shortOptionsBase and shortFlowConfirmed
+int longCauseNow = amdState == AMD_DIST_UP ? STORY_CAUSE_AMD :
+     longFailedDown ? STORY_CAUSE_FAILED_AUCTION :
+     longAcceptance ? STORY_CAUSE_ACCEPTANCE :
+     longSupportDefense ? STORY_CAUSE_DEFENSE :
+     longDiscovery ? STORY_CAUSE_DISCOVERY :
+     (upTerritory or upHolding or buyerSponsored) ? STORY_CAUSE_CONTINUATION : STORY_CAUSE_NONE
+int shortCauseNow = amdState == AMD_DIST_DN ? STORY_CAUSE_AMD :
+     shortFailedUp ? STORY_CAUSE_FAILED_AUCTION :
+     shortAcceptance ? STORY_CAUSE_ACCEPTANCE :
+     shortResistanceDefense ? STORY_CAUSE_DEFENSE :
+     shortDiscovery ? STORY_CAUSE_DISCOVERY :
+     (dnTerritory or dnHolding or sellerSponsored) ? STORY_CAUSE_CONTINUATION : STORY_CAUSE_NONE
+float longCauseAnchorNow = longCauseNow == STORY_CAUSE_AMD ?
+     (not na(amdRangeHi) ? amdRangeHi : not na(busBalHi) ? busBalHi : nz(busRthVwap, math.min(low, low[1]))) :
+     longCauseNow == STORY_CAUSE_FAILED_AUCTION ?
+     (not na(amdRangeLo) ? amdRangeLo : not na(busBalLo) ? busBalLo : not na(busS1) ? busS1 : math.min(low, low[1])) :
+     longCauseNow == STORY_CAUSE_ACCEPTANCE ? nz(rHi, nz(busR1, close)) :
+     longCauseNow == STORY_CAUSE_DEFENSE ? nz(sHi, nz(busS1, math.min(low, low[1]))) :
+     longCauseNow == STORY_CAUSE_DISCOVERY ?
+     (not na(busBalHi) and close > busBalHi ? busBalHi : not na(busR1) and close > busR1 ? busR1 : nz(busRthVwap, math.min(low, low[1]))) :
+     longCauseNow == STORY_CAUSE_CONTINUATION ? nz(busRthVwap, math.min(low, low[1])) : na
+float shortCauseAnchorNow = shortCauseNow == STORY_CAUSE_AMD ?
+     (not na(amdRangeLo) ? amdRangeLo : not na(busBalLo) ? busBalLo : nz(busRthVwap, math.max(high, high[1]))) :
+     shortCauseNow == STORY_CAUSE_FAILED_AUCTION ?
+     (not na(amdRangeHi) ? amdRangeHi : not na(busBalHi) ? busBalHi : not na(busR1) ? busR1 : math.max(high, high[1])) :
+     shortCauseNow == STORY_CAUSE_ACCEPTANCE ? nz(sLo, nz(busS1, close)) :
+     shortCauseNow == STORY_CAUSE_DEFENSE ? nz(rLo, nz(busR1, math.max(high, high[1]))) :
+     shortCauseNow == STORY_CAUSE_DISCOVERY ?
+     (not na(busBalLo) and close < busBalLo ? busBalLo : not na(busS1) and close < busS1 ? busS1 : nz(busRthVwap, math.max(high, high[1]))) :
+     shortCauseNow == STORY_CAUSE_CONTINUATION ? nz(busRthVwap, math.max(high, high[1])) : na
+bool longAttemptObserved =
+     longCauseNow != STORY_CAUSE_NONE or buyerSponsored or upTerritory or upHolding or
+     fpLongAttempt or fpSellerAbsorbed or
+     (auctionCode == AUC_TEST_DN and sellerPoorResult and close > open)
+bool shortAttemptObserved =
+     shortCauseNow != STORY_CAUSE_NONE or sellerSponsored or dnTerritory or dnHolding or
+     fpShortAttempt or fpBuyerAbsorbed or
+     (auctionCode == AUC_TEST_UP and buyerPoorResult and close < open)
+bool longInitiativeControlNow =
+     (upTerritory or upHolding or acceptedAboveR or longAcceptance) and
+     buyerResult >= 0.14 and not buyerPoorResult and
+     not (sellerSponsored and sellerResult > buyerResult and dnTerritory)
+bool shortInitiativeControlNow =
+     (dnTerritory or dnHolding or acceptedBelowS or shortAcceptance) and
+     sellerResult >= 0.14 and not sellerPoorResult and
+     not (buyerSponsored and buyerResult > sellerResult and upTerritory)
+bool longOpponentFailedNow =
+     (sellerSponsored or fpAggSell or auctionCode == AUC_TEST_DN) and
+     (sellerPoorResult or fpSellerAbsorbed) and
+     (close >= open or close > close[1] or upHolding)
+bool shortOpponentFailedNow =
+     (buyerSponsored or fpAggBuy or auctionCode == AUC_TEST_UP) and
+     (buyerPoorResult or fpBuyerAbsorbed) and
+     (close <= open or close < close[1] or dnHolding)
+bool longDefenseControlNow =
+     longSupportDefense and
+     (buyerSponsored or upHolding or buyerResult >= 0.14 or fpSellerAbsorbed) and
+     not acceptedBelowS
+bool shortDefenseControlNow =
+     shortResistanceDefense and
+     (sellerSponsored or dnHolding or sellerResult >= 0.14 or fpBuyerAbsorbed) and
+     not acceptedAboveR
+bool longDistributionControlNow =
+     ((longDiscovery or amdState == AMD_DIST_UP) and
+      (upTerritory or upHolding or longAcceptance or fpPocUp)) or
+     (longAcceptance and (upHolding or close > close[1]))
+bool shortDistributionControlNow =
+     ((shortDiscovery or amdState == AMD_DIST_DN) and
+      (dnTerritory or dnHolding or shortAcceptance or fpPocDown)) or
+     (shortAcceptance and (dnHolding or close < close[1]))
+bool longControlNow = not bullContradicted and
+     (longInitiativeControlNow or longOpponentFailedNow or longDefenseControlNow or longDistributionControlNow)
+bool shortControlNow = not bearContradicted and
+     (shortInitiativeControlNow or shortOpponentFailedNow or shortDefenseControlNow or shortDistributionControlNow)
+bool longHardFailureNow =
+     bullContradicted or
+     (acceptedBelowS and dnTerritory) or
+     (fpLongEffortRejected and (dnTerritory or dnHolding)) or
+     (amdState == AMD_DIST_DN and (dnTerritory or acceptedBelowS))
+bool shortHardFailureNow =
+     bearContradicted or
+     (acceptedAboveR and upTerritory) or
+     (fpShortEffortRejected and (upTerritory or upHolding)) or
+     (amdState == AMD_DIST_UP and (upTerritory or acceptedAboveR))
+int desiredStorySide = SIDE_NONE
+if longControlNow and not shortControlNow
+    desiredStorySide := SIDE_LONG
+else if shortControlNow and not longControlNow
+    desiredStorySide := SIDE_SHORT
+else if longAttemptObserved and not shortAttemptObserved
+    desiredStorySide := SIDE_LONG
+else if shortAttemptObserved and not longAttemptObserved
+    desiredStorySide := SIDE_SHORT
+var int storySide = SIDE_NONE
+var int storyState = STORY_NONE
+var int storyCause = STORY_CAUSE_NONE
+var int storyStartBar = na
+var int storyStateBar = na
+var int storyQuietCount = 0
+var float storyAnchor = na
+var bool storyCounterSeen = false
+var float storyChallengeExtreme = na
+var int storyChallengeBar = na
+var bool storyUsedForMain = false
+var int storyOriginCause = STORY_CAUSE_NONE
+var int storyCauseBar = na
+var int storyCauseRevisions = 0
+var int storyChallengeStartBar = na
+var float storyChallengeOrigin = na
+var float storyChallengeAtr = na
+var float storyChallengePeakOppEffort = 0.0
+var float storyChallengePeakOppResult = 0.0
+var bool storyChallengeSawTerritory = false
+var bool storyChallengeSawHolding = false
+var bool storyChallengeSawValueMigration = false
+var bool storyChallengeSawAcceptance = false
+var bool storyChallengeSawPoorResult = false
+var bool storyChallengeSawAbsorption = false
+var int storyChallengeQuality = CHALLENGE_NONE
+var float storyChallengeReclaimFrac = na
+if storySide == SIDE_NONE and desiredStorySide != SIDE_NONE
+    storySide := desiredStorySide
+    storyState := STORY_FORMING
+    storyCause := desiredStorySide == SIDE_LONG ? longCauseNow : shortCauseNow
+    storyOriginCause := storyCause
+    storyCauseBar := bar_index
+    storyCauseRevisions := 0
+    storyAnchor := desiredStorySide == SIDE_LONG ? longCauseAnchorNow : shortCauseAnchorNow
+    storyStartBar := bar_index
+    storyStateBar := bar_index
+    storyQuietCount := 0
+    storyCounterSeen := false
+    storyChallengeExtreme := na
+    storyChallengeBar := na
+    storyChallengeStartBar := na
+    storyChallengeOrigin := na
+    storyChallengeAtr := na
+    storyChallengePeakOppEffort := 0.0
+    storyChallengePeakOppResult := 0.0
+    storyChallengeSawTerritory := false
+    storyChallengeSawHolding := false
+    storyChallengeSawValueMigration := false
+    storyChallengeSawAcceptance := false
+    storyChallengeSawPoorResult := false
+    storyChallengeSawAbsorption := false
+    storyChallengeQuality := CHALLENGE_NONE
+    storyChallengeReclaimFrac := na
+    storyUsedForMain := false
+bool storyLong = storySide == SIDE_LONG
+bool storyShort = storySide == SIDE_SHORT
+bool storyCurrentAttempt = storyLong ? longAttemptObserved : storyShort ? shortAttemptObserved : false
+bool storyCurrentControl = storyLong ? longControlNow : storyShort ? shortControlNow : false
+bool storyOpposingControl = storyLong ? shortControlNow : storyShort ? longControlNow : false
+bool storyCurrentHardFailure = storyLong ? longHardFailureNow : storyShort ? shortHardFailureNow : false
+bool storyAnchorOwned = storyLong ? (na(storyAnchor) or close >= storyAnchor - atr * 0.12) :
+     storyShort ? (na(storyAnchor) or close <= storyAnchor + atr * 0.12) : false
+bool storyCounterNow = storyLong ?
+     (storyAnchorOwned and (sellerSponsored or fpAggSell or dnHolding or auctionCode == AUC_TEST_DN) and not shortControlNow) :
+     storyShort ?
+     (storyAnchorOwned and (buyerSponsored or fpAggBuy or upHolding or auctionCode == AUC_TEST_UP) and not longControlNow) : false
+bool storyReaccelNow = storyLong ?
+     (storyCounterSeen and storyAnchorOwned and longControlNow and
+      (close > close[1] or high > high[1] or upHolding)) :
+     storyShort ?
+     (storyCounterSeen and storyAnchorOwned and shortControlNow and
+      (close < close[1] or low < low[1] or dnHolding)) : false
+bool storyEvidenceAlive = storyCurrentAttempt or storyCurrentControl or
+     (storyCounterSeen and storyAnchorOwned and not storyOpposingControl)
+if storySide != SIDE_NONE
+    storyQuietCount := storyEvidenceAlive ? 0 : storyQuietCount + 1
+bool storyHardOpposite = storySide != SIDE_NONE and
+     ((storyCurrentHardFailure and storyOpposingControl) or
+      (not storyAnchorOwned and storyOpposingControl))
+if storySide != SIDE_NONE and (storyHardOpposite or storyQuietCount >= storyQuietBars)
+    int oldStorySide = storySide
+    storySide := SIDE_NONE
+    storyState := STORY_NONE
+    storyCause := STORY_CAUSE_NONE
+    storyOriginCause := STORY_CAUSE_NONE
+    storyCauseBar := na
+    storyCauseRevisions := 0
+    storyStartBar := na
+    storyStateBar := na
+    storyAnchor := na
+    storyCounterSeen := false
+    storyChallengeExtreme := na
+    storyChallengeBar := na
+    storyChallengeStartBar := na
+    storyChallengeOrigin := na
+    storyChallengeAtr := na
+    storyChallengePeakOppEffort := 0.0
+    storyChallengePeakOppResult := 0.0
+    storyChallengeSawTerritory := false
+    storyChallengeSawHolding := false
+    storyChallengeSawValueMigration := false
+    storyChallengeSawAcceptance := false
+    storyChallengeSawPoorResult := false
+    storyChallengeSawAbsorption := false
+    storyChallengeQuality := CHALLENGE_NONE
+    storyChallengeReclaimFrac := na
+    storyQuietCount := 0
+    storyUsedForMain := false
+    int replacementSide = longControlNow and not shortControlNow ? SIDE_LONG :
+         shortControlNow and not longControlNow ? SIDE_SHORT : desiredStorySide
+    if storyHardOpposite and replacementSide != SIDE_NONE and replacementSide != oldStorySide
+        storySide := replacementSide
+        storyState := STORY_FORMING
+        storyCause := replacementSide == SIDE_LONG ? longCauseNow : shortCauseNow
+        storyOriginCause := storyCause
+        storyCauseBar := bar_index
+        storyCauseRevisions := 0
+        storyAnchor := replacementSide == SIDE_LONG ? longCauseAnchorNow : shortCauseAnchorNow
+        storyStartBar := bar_index
+        storyStateBar := bar_index
+        storyCounterSeen := false
+        storyChallengeExtreme := na
+        storyChallengeBar := na
+        storyChallengeStartBar := na
+        storyChallengeOrigin := na
+        storyChallengeAtr := na
+        storyChallengePeakOppEffort := 0.0
+        storyChallengePeakOppResult := 0.0
+        storyChallengeSawTerritory := false
+        storyChallengeSawHolding := false
+        storyChallengeSawValueMigration := false
+        storyChallengeSawAcceptance := false
+        storyChallengeSawPoorResult := false
+        storyChallengeSawAbsorption := false
+        storyChallengeQuality := CHALLENGE_NONE
+        storyChallengeReclaimFrac := na
+        storyUsedForMain := false
+storyLong := storySide == SIDE_LONG
+storyShort := storySide == SIDE_SHORT
+storyCurrentAttempt := storyLong ? longAttemptObserved : storyShort ? shortAttemptObserved : false
+storyCurrentControl := storyLong ? longControlNow : storyShort ? shortControlNow : false
+storyOpposingControl := storyLong ? shortControlNow : storyShort ? longControlNow : false
+storyCurrentHardFailure := storyLong ? longHardFailureNow : storyShort ? shortHardFailureNow : false
+storyAnchorOwned := storyLong ? (na(storyAnchor) or close >= storyAnchor - atr * 0.12) :
+     storyShort ? (na(storyAnchor) or close <= storyAnchor + atr * 0.12) : false
+storyCounterNow := storyLong ?
+     (storyAnchorOwned and (sellerSponsored or fpAggSell or dnHolding or auctionCode == AUC_TEST_DN) and not shortControlNow) :
+     storyShort ?
+     (storyAnchorOwned and (buyerSponsored or fpAggBuy or upHolding or auctionCode == AUC_TEST_UP) and not longControlNow) : false
+bool storyChallengeStarting = storySide != SIDE_NONE and storyState == STORY_ACCEPTED and
+     storyCounterNow and not storyCounterSeen
+if storyChallengeStarting
+    storyChallengeStartBar := bar_index
+    storyChallengeOrigin := storyLong ? nz(high[1], close) : nz(low[1], close)
+    storyChallengeAtr := math.max(atr, tick)
+    storyChallengeExtreme := storyLong ? low : high
+    storyChallengeBar := bar_index
+    storyChallengePeakOppEffort := 0.0
+    storyChallengePeakOppResult := 0.0
+    storyChallengeSawTerritory := false
+    storyChallengeSawHolding := false
+    storyChallengeSawValueMigration := false
+    storyChallengeSawAcceptance := false
+    storyChallengeSawPoorResult := false
+    storyChallengeSawAbsorption := false
+    storyChallengeQuality := CHALLENGE_NONE
+    storyChallengeReclaimFrac := na
+bool storyChallengeActiveNow = storySide != SIDE_NONE and
+     (storyChallengeStarting or storyCounterNow or storyState == STORY_CHALLENGED)
+if storyChallengeActiveNow
+    float storyOppEffortNow = storyLong ? sellerEffort : buyerEffort
+    float storyOppResultNow = storyLong ? sellerResult : buyerResult
+    bool storyOppTerritoryNow = storyLong ? dnTerritory : upTerritory
+    bool storyOppHoldingNow = storyLong ? dnHolding : upHolding
+    bool storyOppValueNow = storyLong ? (fpPocDown or fpValueDown) : (fpPocUp or fpValueUp)
+    bool storyOppAcceptanceNow = storyLong ? acceptedBelowS : acceptedAboveR
+    bool storyOppPoorResultNow = storyLong ? sellerPoorResult : buyerPoorResult
+    bool storyOppAbsorbedNow = storyLong ? fpSellerAbsorbed : fpBuyerAbsorbed
+    storyChallengeExtreme := storyLong ?
+         (na(storyChallengeExtreme) ? low : math.min(storyChallengeExtreme, low)) :
+         (na(storyChallengeExtreme) ? high : math.max(storyChallengeExtreme, high))
+    storyChallengeBar := bar_index
+    storyChallengePeakOppEffort := math.max(storyChallengePeakOppEffort, storyOppEffortNow)
+    storyChallengePeakOppResult := math.max(storyChallengePeakOppResult, storyOppResultNow)
+    storyChallengeSawTerritory := storyChallengeSawTerritory or storyOppTerritoryNow
+    storyChallengeSawHolding := storyChallengeSawHolding or storyOppHoldingNow
+    storyChallengeSawValueMigration := storyChallengeSawValueMigration or storyOppValueNow
+    storyChallengeSawAcceptance := storyChallengeSawAcceptance or storyOppAcceptanceNow
+    storyChallengeSawPoorResult := storyChallengeSawPoorResult or storyOppPoorResultNow
+    storyChallengeSawAbsorption := storyChallengeSawAbsorption or storyOppAbsorbedNow
+    bool storyChallengeStrongNow =
+         storyChallengeSawAcceptance or
+         (storyChallengeSawTerritory and storyChallengeSawValueMigration) or
+         (storyChallengeSawTerritory and storyChallengePeakOppResult >= 0.40)
+    bool storyChallengeMeaningfulNow =
+         storyChallengeSawTerritory or storyChallengeSawHolding or
+         storyChallengeSawValueMigration or storyChallengePeakOppResult >= moveMinResult
+    bool storyChallengeWeakNow =
+         not storyChallengeMeaningfulNow and
+         (storyChallengeSawPoorResult or storyChallengeSawAbsorption)
+    int storyObservedChallengeQuality = storyChallengeStrongNow ? CHALLENGE_STRONG :
+         storyChallengeMeaningfulNow ? CHALLENGE_MEANINGFUL :
+         storyChallengeWeakNow ? CHALLENGE_WEAK : CHALLENGE_NONE
+    storyChallengeQuality := int(math.max(storyChallengeQuality, storyObservedChallengeQuality))
+float storyChallengeTravel = storyLong and not na(storyChallengeOrigin) and not na(storyChallengeExtreme) ?
+     math.max(storyChallengeOrigin - storyChallengeExtreme, 0.0) :
+     storyShort and not na(storyChallengeOrigin) and not na(storyChallengeExtreme) ?
+     math.max(storyChallengeExtreme - storyChallengeOrigin, 0.0) : na
+if not na(storyChallengeTravel)
+    storyChallengeReclaimFrac := storyChallengeTravel <= tick ? 1.0 :
+         storyLong ? math.max(0.0, math.min(1.50, (close - storyChallengeExtreme) / storyChallengeTravel)) :
+         storyShort ? math.max(0.0, math.min(1.50, (storyChallengeExtreme - close) / storyChallengeTravel)) : na
+float storyChallengeDepthAtr = not na(storyChallengeTravel) and not na(storyChallengeAtr) ?
+     storyChallengeTravel / math.max(storyChallengeAtr, tick) : na
+int storyChallengeBars = not na(storyChallengeStartBar) ? bar_index - storyChallengeStartBar + 1 : 0
+bool storyChallengeMidReclaimed = not na(storyChallengeReclaimFrac) and storyChallengeReclaimFrac >= 0.50
+bool storyChallengeOriginReclaimed = storyLong and not na(storyChallengeOrigin) ? close >= storyChallengeOrigin :
+     storyShort and not na(storyChallengeOrigin) ? close <= storyChallengeOrigin : false
+bool storyChallengeValueReclaimed = storyLong ?
+     (fpPocUp or fpValueUp or longAcceptance or upHolding) :
+     storyShort ? (fpPocDown or fpValueDown or shortAcceptance or dnHolding) : false
+bool storyChallengeInitiativeReclaimed = storyLong ?
+     (longInitiativeControlNow or longDistributionControlNow) :
+     storyShort ? (shortInitiativeControlNow or shortDistributionControlNow) : false
+bool storyChallengeOpponentFailed = storyLong ?
+     (longOpponentFailedNow or storyChallengeSawAbsorption or
+      (storyChallengeSawPoorResult and (close > close[1] or upHolding))) :
+     storyShort ?
+     (shortOpponentFailedNow or storyChallengeSawAbsorption or
+      (storyChallengeSawPoorResult and (close < close[1] or dnHolding))) : false
+int storyObservedCauseNow = storyLong ? longCauseNow : storyShort ? shortCauseNow : STORY_CAUSE_NONE
+float storyObservedAnchorNow = storyLong ? longCauseAnchorNow : storyShort ? shortCauseAnchorNow : na
+bool storyObservedSpecificCause = storyObservedCauseNow != STORY_CAUSE_NONE and
+     storyObservedCauseNow != STORY_CAUSE_CONTINUATION
+bool storyObservedCauseOwnsControl = storyObservedSpecificCause and storyCurrentControl and
+     not storyOpposingControl and not storyCurrentHardFailure
+bool storyCauseMayEvolve = storyObservedCauseOwnsControl and storyObservedCauseNow != storyCause and
+     (storyCause == STORY_CAUSE_CONTINUATION or storyState == STORY_CHALLENGED or storyCounterSeen)
+if storyCauseMayEvolve
+    storyCause := storyObservedCauseNow
+    storyCauseBar := bar_index
+    storyCauseRevisions += 1
+    bool storyObservedAnchorOwned = storyLong ?
+         (not na(storyObservedAnchorNow) and close >= storyObservedAnchorNow - atr * 0.12) :
+         storyShort ? (not na(storyObservedAnchorNow) and close <= storyObservedAnchorNow + atr * 0.12) : false
+    bool storyObservedAnchorTighter = storyLong ?
+         (na(storyAnchor) or storyObservedAnchorNow > storyAnchor) :
+         storyShort ? (na(storyAnchor) or storyObservedAnchorNow < storyAnchor) : false
+    if (storyState == STORY_CHALLENGED or storyCounterSeen) and
+         storyObservedAnchorOwned and storyObservedAnchorTighter
+        storyAnchor := storyObservedAnchorNow
+storyAnchorOwned := storyLong ? (na(storyAnchor) or close >= storyAnchor - atr * 0.12) :
+     storyShort ? (na(storyAnchor) or close <= storyAnchor + atr * 0.12) : false
+bool storyBaseReaccelNow = storyLong ?
+     (storyCounterSeen and storyAnchorOwned and longControlNow and
+      (close > close[1] or high > high[1] or upHolding)) :
+     storyShort ?
+     (storyCounterSeen and storyAnchorOwned and shortControlNow and
+      (close < close[1] or low < low[1] or dnHolding)) : false
+bool storyWeakChallengeResolved = storyChallengeQuality <= CHALLENGE_WEAK
+bool storyMeaningfulChallengeResolved = storyChallengeQuality == CHALLENGE_MEANINGFUL and
+     (storyChallengeMidReclaimed or storyChallengeValueReclaimed or storyChallengeOpponentFailed)
+bool storyStrongChallengeResolved = storyChallengeQuality == CHALLENGE_STRONG and
+     ((storyChallengeOriginReclaimed and storyChallengeInitiativeReclaimed) or
+      (storyChallengeMidReclaimed and storyChallengeValueReclaimed and storyChallengeOpponentFailed))
+storyReaccelNow := storyBaseReaccelNow and
+     (storyWeakChallengeResolved or storyMeaningfulChallengeResolved or storyStrongChallengeResolved)
+if storySide != SIDE_NONE
+    if storyCurrentHardFailure and (storyOpposingControl or not storyAnchorOwned)
+        storyState := STORY_FAILED
+        storyStateBar := bar_index
+    else
+        if storyState == STORY_FORMING and storyCurrentAttempt
+            storyState := STORY_PROVING
+            storyStateBar := bar_index
+        if (storyState == STORY_FORMING or storyState == STORY_PROVING) and storyCurrentControl and storyAnchorOwned
+            storyState := STORY_ACCEPTED
+            storyStateBar := bar_index
+            storyCounterSeen := false
+        else if storyState == STORY_ACCEPTED and storyCounterNow
+            storyState := STORY_CHALLENGED
+            storyStateBar := bar_index
+            storyCounterSeen := true
+        else if storyState == STORY_CHALLENGED and storyOpposingControl and not storyAnchorOwned
+            storyState := STORY_FAILED
+            storyStateBar := bar_index
+        else if storyState == STORY_CHALLENGED and storyReaccelNow
+            storyState := STORY_REACCEL
+            storyStateBar := bar_index
+            if not storyObservedSpecificCause
+                if storyCause != STORY_CAUSE_FAILED_CHALLENGE
+                    storyCause := STORY_CAUSE_FAILED_CHALLENGE
+                    storyCauseBar := bar_index
+                    storyCauseRevisions += 1
+        else if storyState == STORY_REACCEL and storyCurrentControl
+            storyState := STORY_ACCEPTED
+            storyStateBar := bar_index
+            storyCounterSeen := false
+float storyDistanceAtr = storySide == SIDE_NONE or na(storyAnchor) ? na :
+     storyLong ? math.max(0.0, close - storyAnchor) / math.max(atr, tick) :
+     math.max(0.0, storyAnchor - close) / math.max(atr, tick)
+float storyCapacityPts = storyLong ? longMoveRoomPts : storyShort ? shortMoveRoomPts : na
+int storyStageCode = STORY_STAGE_HEALTHY
+if not na(storyDistanceAtr)
+    storyStageCode := storyDistanceAtr >= storyExhaustedAtr or
+         (not na(storyCapacityPts) and storyCapacityPts < storyMinCapacityPts * 0.50) ? STORY_STAGE_EXHAUSTED :
+         storyDistanceAtr >= storyMatureAtr or
+         (not na(storyCapacityPts) and storyCapacityPts < storyMinCapacityPts) ? STORY_STAGE_MATURE :
+         storyDistanceAtr <= storyEarlyAtr ? STORY_STAGE_EARLY : STORY_STAGE_HEALTHY
+bool storyFlowContradicted = storyLong ?
+     (fpHas and fpLongEffortRejected and (dnTerritory or dnHolding)) :
+     storyShort ? (fpHas and fpShortEffortRejected and (upTerritory or upHolding)) : false
+bool storyActionState = storyState == STORY_ACCEPTED or storyState == STORY_REACCEL
+bool storyUnresolvedTwoWay = longControlNow and shortControlNow
+bool storyBrainReady = storySide != SIDE_NONE and not storyUsedForMain and
+     storyActionState and storyCurrentControl and storyAnchorOwned and
+     not storyOpposingControl and not storyUnresolvedTwoWay and not storyFlowContradicted
+bool longStoryBrainReady = storySide == SIDE_LONG and storyBrainReady
+bool shortStoryBrainReady = storySide == SIDE_SHORT and storyBrainReady
+float payoffBuf = math.max(tick * 2.0, atr * payoffInvalidBufferAtr)
+float storyQuestionTrigger = storyLong ? high + tick : storyShort ? low - tick : na
+bool storyHasFreshChallenge = not na(storyChallengeExtreme) and not na(storyChallengeBar) and
+     bar_index - storyChallengeBar <= storyQuietBars + 2
+float storyQuestionInvalidRaw = storyLong ?
+     (storyHasFreshChallenge ? storyChallengeExtreme - payoffBuf :
+      not na(storyAnchor) ? storyAnchor - payoffBuf : math.min(low, low[1]) - payoffBuf) :
+     storyShort ?
+     (storyHasFreshChallenge ? storyChallengeExtreme + payoffBuf :
+      not na(storyAnchor) ? storyAnchor + payoffBuf : math.max(high, high[1]) + payoffBuf) : na
+float storyQuestionInvalid = storyLong ?
+     (na(longStop) ? storyQuestionInvalidRaw : math.max(longStop, storyQuestionInvalidRaw)) :
+     storyShort ?
+     (na(shortStop) ? storyQuestionInvalidRaw : math.min(shortStop, storyQuestionInvalidRaw)) : na
+bool storyQuestionGeometry = storyLong ?
+     not na(storyQuestionTrigger) and not na(storyQuestionInvalid) and storyQuestionInvalid < storyQuestionTrigger - tick :
+     storyShort ?
+     not na(storyQuestionTrigger) and not na(storyQuestionInvalid) and storyQuestionInvalid > storyQuestionTrigger + tick : false
+float storyQuestionRiskPts = storyQuestionGeometry ? math.abs(storyQuestionTrigger - storyQuestionInvalid) : na
+float storyQuestionTargetPts = storyQuestionGeometry ?
+     math.max(payoffMinMovePts, storyQuestionRiskPts * payoffQuestionR) : na
+float storyQuestionTargetAtr = storyQuestionGeometry ? storyQuestionTargetPts / math.max(atr, tick) : na
+float storyQuestionTargetPrice = storyLong and storyQuestionGeometry ? storyQuestionTrigger + storyQuestionTargetPts :
+     storyShort and storyQuestionGeometry ? storyQuestionTrigger - storyQuestionTargetPts : na
+float storyHardRoomPts = storyLong and r1HardObstacle ? math.max(0.0, busR1 - storyQuestionTrigger) :
+     storyShort and s1HardObstacle ? math.max(0.0, storyQuestionTrigger - busS1) : na
+bool storyTargetBeforeHardBarrier = na(storyHardRoomPts) or
+     (not na(storyQuestionTargetPts) and storyQuestionTargetPts <= storyHardRoomPts)
+bool storyCanBreakBarrier = storyLong ? longExpansionCanBreak : storyShort ? shortExpansionCanBreak : false
+bool storyPathCanPay = storyTargetBeforeHardBarrier or storyCanBreakBarrier
+bool storyTargetEasy = not na(storyQuestionTargetAtr) and storyQuestionTargetAtr <= storyEarlyAtr
+bool storyTargetMedium = not na(storyQuestionTargetAtr) and storyQuestionTargetAtr > storyEarlyAtr and storyQuestionTargetAtr <= storyMatureAtr
+bool storyTargetLarge = not na(storyQuestionTargetAtr) and storyQuestionTargetAtr > storyMatureAtr
+float storySideResult = storyLong ? buyerResult : storyShort ? sellerResult : 0.0
+bool storySideTerritory = storyLong ? (upTerritory or upHolding) : storyShort ? (dnTerritory or dnHolding) : false
+bool storySideSponsored = storyLong ? buyerSponsored : storyShort ? sellerSponsored : false
+bool storyOpponentPoorResult = storyLong ? sellerPoorResult : storyShort ? buyerPoorResult : false
+bool storyOpponentAbsorbed = storyLong ? fpSellerAbsorbed : storyShort ? fpBuyerAbsorbed : false
+bool storyFreshReaccel = storyState == STORY_REACCEL and storyHasFreshChallenge
+bool storyMediumEngine =
+     storyFreshReaccel or
+     (storySideTerritory and (storySideSponsored or storySideResult >= 0.14)) or
+     (storyOpponentPoorResult and (storySideSponsored or storyOpponentAbsorbed or
+       storyCause == STORY_CAUSE_FAILED_AUCTION or storyCause == STORY_CAUSE_DEFENSE or
+       storyCause == STORY_CAUSE_FAILED_CHALLENGE))
+bool storyLargeEngine =
+     storyCanBreakBarrier and moveEnvironmentReady and
+     storySideTerritory and storySideResult >= 0.40 and territoryEfficiency >= moveMinEfficiency
+bool storyEngineCanPay = storyTargetEasy ? storyCurrentControl :
+     storyTargetMedium ? storyMediumEngine :
+     storyTargetLarge ? storyLargeEngine : false
+bool storyPayoffNotSpent = storyStageCode != STORY_STAGE_EXHAUSTED and
+     (storyStageCode != STORY_STAGE_MATURE or storyFreshReaccel)
+bool storyPayoffReady = storyQuestionGeometry and storyPathCanPay and
+     storyEngineCanPay and storyPayoffNotSpent
+bool r1MeaningfulFight = not na(busR1) and
+     rState != Z_ACCEPTED and rState != Z_WEAK and rState != Z_CONSUMED and
+     (rState == Z_DEFENDED or rStrength >= 7)
+bool s1MeaningfulFight = not na(busS1) and
+     sState != Z_ACCEPTED and sState != Z_WEAK and sState != Z_CONSUMED and
+     (sState == Z_DEFENDED or sStrength >= 7)
+bool storyAtHardFight = storyLong ?
+     (r1MeaningfulFight and (nearR or touchedR) and not acceptedAboveR) :
+     storyShort ? (s1MeaningfulFight and (nearS or touchedS) and not acceptedBelowS) : false
+bool storyLevelAlreadyResolved = storyLong ?
+     (acceptedAboveR or r1BattleCtx == 5 or r1BattleCtx == 7 or r1BattleCtx == 9) :
+     storyShort ? (acceptedBelowS or s1BattleCtx == 5 or s1BattleCtx == 8 or s1BattleCtx == 9) : false
+bool storyUnresolvedLevelFight = storyAtHardFight and not storyLevelAlreadyResolved
+bool storyPullbackDangerous = storySide != SIDE_NONE and storyState == STORY_CHALLENGED and
+     (storyOpposingControl or not storyAnchorOwned or storyFlowContradicted or
+      storyChallengeQuality == CHALLENGE_STRONG or
+      (storyLong and acceptedBelowS and dnTerritory) or
+      (storyShort and acceptedAboveR and upTerritory))
+bool storyPullbackHealthy = storySide != SIDE_NONE and storyState == STORY_CHALLENGED and
+     storyAnchorOwned and not storyOpposingControl and not storyFlowContradicted and
+     not storyPullbackDangerous
+int storyParticipationCause = storyCause
+
+bool storyLongInitiativeNow = storyLong and
+     (longAcceptance or longDiscovery or amdState == AMD_DIST_UP or
+      fpLongInitiativeConfirm or fpLongImmediateDrive)
+bool storyShortInitiativeNow = storyShort and
+     (shortAcceptance or shortDiscovery or amdState == AMD_DIST_DN or
+      fpShortInitiativeConfirm or fpShortImmediateDrive)
+bool storyInitiativeNow = storyLong ? storyLongInitiativeNow :
+     storyShort ? storyShortInitiativeNow : false
+
+bool storyFreshCausalCause = storyParticipationCause == STORY_CAUSE_FAILED_AUCTION or
+     storyParticipationCause == STORY_CAUSE_ACCEPTANCE or
+     storyParticipationCause == STORY_CAUSE_DISCOVERY or storyParticipationCause == STORY_CAUSE_AMD or
+     storyParticipationCause == STORY_CAUSE_FAILED_CHALLENGE
+
+bool storyDefenseConvertedToInitiative =
+     storyParticipationCause == STORY_CAUSE_DEFENSE and storyInitiativeNow
+
+bool storyFreshCausalDirect = storyState == STORY_ACCEPTED and
+     (storyFreshCausalCause or
+      (not enableResponsiveInitiativeReasoning and storyParticipationCause == STORY_CAUSE_DEFENSE) or
+      (enableResponsiveInitiativeReasoning and storyDefenseConvertedToInitiative)) and
+     storyStageCode == STORY_STAGE_EARLY and not storyUnresolvedLevelFight
+
+bool storyDevelopedContinuationDirect = storyState == STORY_ACCEPTED and
+     storyParticipationCause == STORY_CAUSE_CONTINUATION and storyStageCode == STORY_STAGE_HEALTHY and
+     not storyUnresolvedLevelFight
+bool storyReaccelParticipation = storyState == STORY_REACCEL and storyHasFreshChallenge and
+     storyChallengeQuality == CHALLENGE_MEANINGFUL and
+     storyCurrentControl and storyAnchorOwned and not storyOpposingControl and
+     not storyFlowContradicted and
+     (storyStageCode == STORY_STAGE_EARLY or storyStageCode == STORY_STAGE_HEALTHY)
+bool storyDirectParticipation = storyBrainReady and
+     (storyFreshCausalDirect or storyDevelopedContinuationDirect)
+int storyParticipationState = PART_NONE
+if storySide != SIDE_NONE
+    storyParticipationState := storyPullbackDangerous ? PART_PULLBACK_DANGEROUS :
+         storyPullbackHealthy ? PART_PULLBACK_HEALTHY :
+         storyReaccelParticipation ? PART_REACCEL :
+         storyUnresolvedLevelFight and storyActionState ? PART_WAIT_LEVEL :
+         storyDirectParticipation ? PART_DIRECT :
+         storyActionState ? PART_WAIT_PULLBACK : PART_NONE
+bool storyParticipationReady = storyParticipationState == PART_DIRECT or
+     storyParticipationState == PART_REACCEL
+bool longStoryParticipationReady = storySide == SIDE_LONG and storyParticipationReady
+bool shortStoryParticipationReady = storySide == SIDE_SHORT and storyParticipationReady
+string storyParticipationWhy = storyParticipationState == PART_DIRECT ? "DIRECT" :
+     storyParticipationState == PART_REACCEL ? "RE-ACCEL" :
+     storyParticipationState == PART_WAIT_LEVEL ? "WAIT LEVEL RESPONSE" :
+     storyParticipationState == PART_PULLBACK_HEALTHY ? "PULLBACK HEALTHY" :
+     storyParticipationState == PART_PULLBACK_DANGEROUS ? "PULLBACK DANGEROUS" :
+     storyParticipationState == PART_WAIT_PULLBACK ?
+          (storyStageCode == STORY_STAGE_MATURE or storyStageCode == STORY_STAGE_EXHAUSTED ?
+               "WAIT RESET / NO CHASE" :
+           storyParticipationCause == STORY_CAUSE_CONTINUATION and storyStageCode == STORY_STAGE_EARLY ?
+               "WAIT CONTINUATION PROOF" :
+               "WAIT PULLBACK / BETTER LOCATION") : "WAIT"
+f_storyText(int st) =>
+    st == STORY_FORMING ? "FORMING" :
+     st == STORY_PROVING ? "PROVING" :
+     st == STORY_ACCEPTED ? "ACCEPTED" :
+     st == STORY_CHALLENGED ? "CHALLENGED" :
+     st == STORY_REACCEL ? "RE-ACCEL" :
+     st == STORY_FAILED ? "FAILED" : "NONE"
+f_storyCauseText(int c) =>
+    c == STORY_CAUSE_FAILED_AUCTION ? "FAILED AUCTION" :
+     c == STORY_CAUSE_ACCEPTANCE ? "ACCEPTANCE" :
+     c == STORY_CAUSE_DEFENSE ? "DEFENSE" :
+     c == STORY_CAUSE_DISCOVERY ? "DISCOVERY" :
+     c == STORY_CAUSE_AMD ? "AMD DISTRIBUTION" :
+     c == STORY_CAUSE_CONTINUATION ? "CONTINUING CONTROL" :
+     c == STORY_CAUSE_FAILED_CHALLENGE ? "FAILED CHALLENGE" : "NONE"
+f_participationText(int st) =>
+    st == PART_DIRECT ? "DIRECT" :
+     st == PART_WAIT_PULLBACK ? "WAIT PULLBACK" :
+     st == PART_PULLBACK_HEALTHY ? "PULLBACK HEALTHY" :
+     st == PART_PULLBACK_DANGEROUS ? "PULLBACK DANGEROUS" :
+     st == PART_REACCEL ? "RE-ACCEL" :
+     st == PART_WAIT_LEVEL ? "WAIT LEVEL" : "NONE"
+bool longContinuationQuality =
+     not bullContradicted and not buyerCounterWeak and not fpLongContradiction and not amdOpposesLong and
+     (upTerritory or upHolding or auctionCode == AUC_EXP_UP or acceptedAboveR) and
+     buyerResult >= math.max(moveMinResult, 0.18) and territoryEfficiency >= moveMinEfficiency and
+     moveEnvironmentReady and (not fpHas or fpLongSupport or fpLongConstructive or fpSellerAbsorbed or amdSupportsLong) and
+     (not sellerSponsored or buyerResult > sellerResult or fpSellerAbsorbed)
+bool shortContinuationQuality =
+     not bearContradicted and not sellerCounterWeak and not fpShortContradiction and not amdOpposesShort and
+     (dnTerritory or dnHolding or auctionCode == AUC_EXP_DN or acceptedBelowS) and
+     sellerResult >= math.max(moveMinResult, 0.18) and territoryEfficiency >= moveMinEfficiency and
+     moveEnvironmentReady and (not fpHas or fpShortSupport or fpShortConstructive or fpBuyerAbsorbed or amdSupportsShort) and
+     (not buyerSponsored or sellerResult > buyerResult or fpBuyerAbsorbed)
+float longReentryTriggerNow = high + tick
+float shortReentryTriggerNow = low - tick
+float longReentryRoomNow = not na(longMoveDest) ? math.max(0.0, longMoveDest - longReentryTriggerNow) : na
+float shortReentryRoomNow = not na(shortMoveDest) ? math.max(0.0, shortReentryTriggerNow - shortMoveDest) : na
+bool longReentryRouteReady = na(longReentryRoomNow) or longReentryRoomNow >= reentryMinClearRoomPts
+bool shortReentryRouteReady = na(shortReentryRoomNow) or shortReentryRoomNow >= reentryMinClearRoomPts
+f_amdText(int st) =>
+    st == AMD_ACCUM ? "ACCUMULATION" :
+     st == AMD_MANIP_DN ? "MANIP DOWN / RECLAIM WATCH" :
+     st == AMD_MANIP_UP ? "MANIP UP / REJECT WATCH" :
+     st == AMD_DIST_UP ? "DISTRIBUTION UP" :
+     st == AMD_DIST_DN ? "DISTRIBUTION DOWN" : "NONE"
+f_lifeText(int st) =>
+    st == LIFE_PROVING ? "PROVING" :
+     st == LIFE_EXPANDING ? "EXPANDING" :
+     st == LIFE_HEALTHY ? "HEALTHY" :
+     st == LIFE_MATURE ? "MATURE" :
+     st == LIFE_EXHAUSTING ? "EXHAUSTING" :
+     st == LIFE_TRANSFER ? "CONTROL TRANSFER" : "NONE"
+f_fpText() =>
+    not fpHas ? "NO FOOTPRINT" :
+     fpLongExhaustion ? "BUY AGGRESSION ABSORBED" :
+     fpShortExhaustion ? "SELL AGGRESSION ABSORBED" :
+     fpSellerAbsorbed ? "SELL PRESSURE ABSORBED" :
+     fpBuyerAbsorbed ? "BUY PRESSURE ABSORBED" :
+     fpLongSupport ? "BUY FLOW CONFIRMS" :
+     fpShortSupport ? "SELL FLOW CONFIRMS" :
+     fpLongConstructive ? "VALUE MIGRATING UP" :
+     fpShortConstructive ? "VALUE MIGRATING DOWN" :
+     "TWO-WAY / NEUTRAL"
+f_aucTag(int c) =>
+    c == AUC_BALANCE ? "BAL" :
+     c == AUC_BUILD ? "BLD" :
+     c == AUC_TEST_UP ? "TUP" :
+     c == AUC_TEST_DN ? "TDN" :
+     c == AUC_FAIL_UP ? "FUP" :
+     c == AUC_FAIL_DN ? "FDN" :
+     c == AUC_EXP_UP ? "XUP" :
+     c == AUC_EXP_DN ? "XDN" :
+     c == AUC_CHOP ? "CHP" : "TRN"
+f_reasonTag(string r) =>
+    r == "FAILED DOWN / RECLAIM" ? "FAIL_DN" :
+     r == "BREAK + ACCEPTANCE" ? "ACC_UP" :
+     r == "SUPPORT DEFENSE" ? "SUP_DEF" :
+     r == "UPWARD DISCOVERY" ? "DISC_UP" :
+     r == "FAILED UP / REJECTION" ? "FAIL_UP" :
+     r == "BREAKDOWN + ACCEPTANCE" ? "ACC_DN" :
+     r == "RESISTANCE DEFENSE" ? "RES_DEF" :
+     r == "DOWNWARD DISCOVERY" ? "DISC_DN" :
+     r == "UP MOVE DEVELOPING" ? "DEV_UP" :
+     r == "DOWN MOVE DEVELOPING" ? "DEV_DN" : "OTHER"
+f_territoryTag() =>
+    upTerritory ? "BG" :
+     dnTerritory ? "SG" :
+     upHolding ? "BH" :
+     dnHolding ? "SH" : "CT"
+f_effortTag(float e) =>
+    e >= 0.75 ? "H" : e >= 0.30 ? "A" : "L"
+f_resultTag(float r) =>
+    r >= 0.40 ? "G" : r >= 0.14 ? "S" : "P"
+f_counterTag() =>
+    sellerCounterWeak ? "SW" :
+     buyerCounterWeak ? "BW" : "TW"
+f_oppTag() =>
+    acceptedAboveR ? "SHORT_PRESS" :
+     sweptRFailed ? "BRK_LONG_VULN" :
+     acceptedBelowS ? "LONG_PRESS" :
+     sweptSFailed ? "BRK_SHORT_VULN" :
+     nearR ? "R1_DEF" :
+     nearS ? "S1_DEF" : "NONE"
+f_zoneTag(int st, int strength, int src) =>
+    str.tostring(st) + "." + str.tostring(strength) + "." + str.tostring(src)
+f_num(float x, string fmt) =>
+    na(x) ? "NA" : str.tostring(x, fmt)
+f_ctEventText(int ev) =>
+    ev == CT_EVT_STRUCTURE ? "STRUCTURE" :
+     ev == CT_EVT_FAILED_AUCTION ? "FAILED AUCTION" :
+     ev == CT_EVT_DRIVE ? "DRIVE" :
+     ev == CT_EVT_EFFORT_RESULT ? "EFFORT/RESULT" :
+     ev == CT_EVT_RESPONSE ? "RESPONSE" :
+     ev == CT_EVT_RECOVERY ? "RECOVERY" :
+     ev == CT_EVT_RESPONSE_FAIL ? "RESPONSE FAIL" :
+     ev == CT_EVT_ACCEPTANCE ? "ACCEPTANCE" :
+     ev == CT_EVT_CONTINUATION ? "CONTINUATION" : "NONE"
+f_ctEventTag(int ev) =>
+    ev == CT_EVT_STRUCTURE ? "STRUCT" :
+     ev == CT_EVT_FAILED_AUCTION ? "FAILAUC" :
+     ev == CT_EVT_DRIVE ? "DRIVE" :
+     ev == CT_EVT_EFFORT_RESULT ? "EFFRES" :
+     ev == CT_EVT_RESPONSE ? "RESP" :
+     ev == CT_EVT_RECOVERY ? "RECOV" :
+     ev == CT_EVT_RESPONSE_FAIL ? "RESPFAIL" :
+     ev == CT_EVT_ACCEPTANCE ? "ACCEPT" :
+     ev == CT_EVT_CONTINUATION ? "CONT" : "NONE"
+f_shockTag(int st) =>
+    st == 1 ? "SHK" :
+     st == 2 ? "RPR" :
+     st == 3 ? "STB" : "NRM"
+f_shockDirTag(int d) =>
+    d > 0 ? "UP" : d < 0 ? "DN" : "NA"
+f_rxTag(int rx) =>
+    rx == 1 ? "FRESH" :
+     rx == 2 ? "DEF1" :
+     rx == 3 ? "STR" :
+     rx == 4 ? "STB" :
+     rx == 5 ? "WEAK" :
+     rx == 6 ? "WORN" :
+     rx == 7 ? "ACC_UP" :
+     rx == 8 ? "ACC_DN" :
+     rx == 9 ? "CONS" : "NA"
+f_battleTag(int b) =>
+    b == 1 ? "FRESH" :
+     b == 2 ? "DEF1" :
+     b == 3 ? "STR" :
+     b == 4 ? "MIX" :
+     b == 5 ? "WEAK" :
+     b == 6 ? "2WAY" :
+     b == 7 ? "ACC_UP" :
+     b == 8 ? "ACC_DN" :
+     b == 9 ? "CONS" : "NA"
+f_openLocTag(int x) =>
+    x == 1 ? "BELOW_ON" :
+     x == 2 ? "ON_LOW" :
+     x == 3 ? "ON_MID" :
+     x == 4 ? "ON_HIGH" :
+     x == 5 ? "ABOVE_ON" : "NA"
+f_gapTag(int x) =>
+    x == 1 ? "BIG_DN" :
+     x == 2 ? "DN" :
+     x == 3 ? "FLAT" :
+     x == 4 ? "UP" :
+     x == 5 ? "BIG_UP" : "NA"
+f_openAuctionTag(int x) =>
+    x == 1 ? "OPEN_IN" :
+     x == 2 ? "OPEN_ABOVE" :
+     x == 3 ? "OPEN_BELOW" :
+     x == 4 ? "ABOVE_RECLAIM" :
+     x == 5 ? "BELOW_RECLAIM" :
+     x == 6 ? "IN_BREAK_UP" :
+     x == 7 ? "IN_BREAK_DN" : "NA"
+f_orTag(int x) =>
+    x == 1 ? "BELOW" :
+     x == 2 ? "INSIDE" :
+     x == 3 ? "ABOVE" : "DEV"
+f_dowTag(int d) =>
+    d == 1 ? "MON" :
+     d == 2 ? "TUE" :
+     d == 3 ? "WED" :
+     d == 4 ? "THU" :
+     d == 5 ? "FRI" : "NA"
+f_phaseTag(int slot) =>
+    slot <= 0 ? "NA" :
+     slot <= 12 ? "OPEN" :
+     slot <= 48 ? "MID" : "LATE"
+f_ptSlotTag(int slot) =>
+    if slot <= 0
+        "NA"
+    else
+        int totalMin = 390 + (slot - 1) * 5
+        int hh = int(math.floor(totalMin / 60))
+        int mm = totalMin % 60
+        (hh < 10 ? "0" : "") + str.tostring(hh) + (mm < 10 ? "0" : "") + str.tostring(mm)
+f_calendarTag(int c) =>
+    c == 1 ? "ROLL" :
+     c == 2 ? "EXP" : "NORMAL"
+f_esTag(int c) =>
+    c == 1 ? "UP_AGREE" :
+     c == 2 ? "DN_AGREE" :
+     c == 3 ? "QQQ_UP_DVG" :
+     c == 4 ? "QQQ_DN_DVG" :
+     c == 5 ? "MIX" : "NA"
+f_vixLevelTag(int c) =>
+    c == 1 ? "LOW" :
+     c == 2 ? "NORMAL" :
+     c == 3 ? "ELEV" : "NA"
+f_vixMoveTag(int c) =>
+    c == 1 ? "FAST_DN" :
+     c == 2 ? "DN" :
+     c == 3 ? "QUIET" :
+     c == 4 ? "UP" :
+     c == 5 ? "FAST_UP" : "NA"
+
+f_directionalRefreshReason(bool enabled, int side, bool consumed, int memorySide,
+     bool balanceSeen, int currentCause, int participation,
+     int challengeQuality, float reclaimFrac, float currentAnchor, float memoryAnchor,
+     bool currentControl, bool actionState, bool globalRenewalNow, float atrNow) =>
+    int reason = 0
+    bool sameConsumed = enabled and consumed and memorySide == side
+    if not sameConsumed
+        reason := 1
+    else
+        bool materiallyNewLocation =
+             not na(currentAnchor) and not na(memoryAnchor) and
+             math.abs(currentAnchor - memoryAnchor) >= atrNow * MEMORY_NEW_LOCATION_ATR
+
+        bool balanceDiscovery =
+             balanceSeen and currentControl and actionState and
+             (currentCause == STORY_CAUSE_DISCOVERY or
+              currentCause == STORY_CAUSE_ACCEPTANCE or
+              currentCause == STORY_CAUSE_AMD)
+
+        bool meaningfulChallengeReset =
+             participation == PART_REACCEL and
+             challengeQuality == CHALLENGE_MEANINGFUL and
+             not na(reclaimFrac) and reclaimFrac >= MEMORY_RECLAIM_FRAC and
+             materiallyNewLocation and currentControl and
+             globalRenewalNow
+
+        reason := balanceDiscovery ? 2 :
+             meaningfulChallengeReset ? 4 : 0
+    reason
+
+// Automation webhook contract. This does not change trading logic; it only standardizes
+// order-fill messages consumed by Asads automation. SOURCE MAIN is intentional because
+// v0.7.8/v0.7.9 worker ships with MAIN enabled. TradingView evaluates these series
+// strings when the strategy order actually fills, so TV_TS is the fill-event time.
+const string AUTO_SOURCE = "MAIN"
+const string AUTO_BOT_TAG = "OPT2V191"
+// Live webhook commands are intentionally limited to exactly three actionable verbs:
+// CALL, PUT, EXIT.  PRIMARY/REENTRY and exit causes are metadata only.
+f_autoEntry(string direction, string leg, float entryPx, float targetPx, float stopPx) =>
+    string optionAction = direction == "LONG" ? "CALL" : "PUT"
+    "SOURCE " + AUTO_SOURCE + " | " + optionAction + " QQQ" +
+     " | LEG " + leg +
+     " | ENTRY " + str.tostring(entryPx, format.mintick) +
+     " | TARGET " + str.tostring(targetPx, format.mintick) +
+     " | SL " + str.tostring(stopPx, format.mintick) +
+     " | TV_TS " + str.tostring(timenow) +
+     " | SIG_ID " + AUTO_BOT_TAG + "-" + optionAction + "-" + leg + "-" + str.tostring(timenow)
+
+f_autoExit(string reason, string leg) =>
+    "SOURCE " + AUTO_SOURCE + " | EXIT QQQ" +
+     " | LEG " + leg +
+     " | REASON " + reason +
+     " | TV_TS " + str.tostring(timenow) +
+     " | SIG_ID " + AUTO_BOT_TAG + "-EXIT-" + leg + "-" + str.tostring(timenow)
+
+f_autoArm(string direction, string leg, float triggerPx) =>
+    string optionAction = direction == "LONG" ? "CALL" : "PUT"
+    "SOURCE " + AUTO_SOURCE + " | ARM " + optionAction + " QQQ" +
+     " | LEG " + leg +
+     " | TRIGGER " + str.tostring(triggerPx, format.mintick) +
+     " | TV_TS " + str.tostring(timenow)
+
+f_buildArmMeta(string sideTag, string reason, float routeR, float trg, float sl, float tp, string maturityTag, string controlTag, string participationTag, int refreshCount, string sessionTag, float dayR, int dayStops, string auditSnapshot) =>
+    "V=OPT2B191" +
+     "|SD=" + sideTag +
+     "|F=" + f_reasonTag(reason) +
+     "|A=" + f_aucTag(auctionCode) +
+     "|T=" + f_territoryTag() +
+     "|BEC=" + f_effortTag(buyerEffort) + f_resultTag(buyerResult) +
+     "|SEC=" + f_effortTag(sellerEffort) + f_resultTag(sellerResult) +
+     "|BE=" + f_num(buyerEffort, "#.###") +
+     "|BR=" + f_num(buyerResult, "#.###") +
+     "|SE=" + f_num(sellerEffort, "#.###") +
+     "|SR=" + f_num(sellerResult, "#.###") +
+     "|C=" + f_counterTag() +
+     "|OP=" + f_oppTag() +
+     "|RR=" + f_num(routeR, "#.###") +
+     "|EFF=" + f_num(territoryEfficiency, "#.###") +
+     "|POS=" + f_num(rangePosition, "#.###") +
+     "|RV=" + f_num(relVol, "#.###") +
+     "|MAT=" + maturityTag +
+     "|CTL=" + controlTag +
+     "|PART=" + participationTag +
+     "|REF=" + str.tostring(refreshCount) +
+     "|SES=" + sessionTag +
+     "|DR=" + f_num(dayR, "#.###") +
+     "|DS=" + str.tostring(dayStops) +
+     "|CTX=" + (ctxValid ? "1" : "0") +
+     "|SH=" + f_shockTag(shockStateCtx) +
+     "|SHD=" + f_shockDirTag(shockDirCtx) +
+     "|SHE=" + str.tostring(shockEvidenceCtx) +
+     "|SHA=" + str.tostring(shockAgeCtx) +
+     "|SHI=" + str.tostring(shockImpulseCtx) +
+     "|SHR=" + str.tostring(shockRetraceCtx) +
+     "|SHX=" + str.tostring(shockExtremeAgeCtx) +
+     "|OL=" + f_openLocTag(openLocationCtx) +
+     "|GAP=" + f_gapTag(gapCtx) +
+     "|OA=" + f_openAuctionTag(openingAuctionCtx) +
+     "|OR=" + f_orTag(openingRangeCtx) +
+     "|R1B=" + f_battleTag(r1BattleCtx) +
+     "|S1B=" + f_battleTag(s1BattleCtx) +
+     "|R1RX=" + f_rxTag(r1ReactionCtx) +
+     "|S1RX=" + f_rxTag(s1ReactionCtx) +
+     "|DOW=" + f_dowTag(weekdayCtx) +
+     "|PT=" + f_ptSlotTag(rthSlotCtx) +
+     "|PH=" + f_phaseTag(rthSlotCtx) +
+     "|CLK=" + (clockReadyCtx ? "1" : "0") +
+     "|RVT=" + f_num(timeRelVolCtx, "#.0") +
+     "|RGT=" + f_num(timeRelRangeCtx, "#.0") +
+     "|EFT=" + f_num(timeRelEffCtx, "#.0") +
+     "|VP=" + f_num(volumePaceCtx, "#.0") +
+     "|RP=" + f_num(rangePaceCtx, "#.0") +
+     "|CAL=" + f_calendarTag(calendarCtx) +
+     "|MKT=" + f_esTag(esContextCtx) +
+     "|VXL=" + f_vixLevelTag(vixLevelCtx) +
+     "|VXM=" + f_vixMoveTag(vixMoveCtx) +
+     "|SHEP=" + str.tostring(shockEpisodeCountCtx) +
+     "|SDC=" + ((ctxValid and shockStateCtx == 3 and shockDirCtx < 0) ? "1" : "0") +
+     "|RAC=" + ((ctxValid and r1ReactionCtx == 7) ? "1" : "0") +
+     "|MV=" + str.tostring(mapVersion) +
+     "|R1=" + f_zoneTag(rState, rStrength, rSource) +
+     "|S1=" + f_zoneTag(sState, sStrength, sSource) +
+     "|BH=" + f_num(busBalHi, format.mintick) +
+     "|BL=" + f_num(busBalLo, format.mintick) +
+     "|AT=" + str.tostring(time) +
+     "|TRG=" + f_num(trg, format.mintick) +
+     "|SL=" + f_num(sl, format.mintick) +
+     "|MILE=" + f_num(tp, format.mintick) +
+     "|FP=" + (fpHas ? "1" : "0") +
+     "|FPD=" + f_num(fpDeltaPct, "#.###") +
+     "|FPI=" + str.tostring(fpBuyImbCount) + "." + str.tostring(fpSellImbCount) +
+     "|FPS=" + str.tostring(fpMaxBuyStack) + "." + str.tostring(fpMaxSellStack) +
+     "|FPM=" + (fpPocUp ? "U" : fpPocDown ? "D" : "N") +
+     "|AMD=" + str.tostring(amdState) +
+     "|FUEL=" + ((sideTag == "L" ? longFlowConfirmed : shortFlowConfirmed) ? "1" : "0") +
+     "|FEV=" + (sideTag == "L" ?
+          (longFlowUnknown ? "U" : longFlowRejected ? "R" : longFlowConfirmed ? "C" : "N") :
+          (shortFlowUnknown ? "U" : shortFlowRejected ? "R" : shortFlowConfirmed ? "C" : "N")) +
+     "|FPC=" + (sideTag == "L" ?
+          (fpLongAbsorptionConfirm ? "ABS" : fpLongInitiativeConfirm ? "INIT" : fpLongImmediateDrive ? "DRIVE" : amdState == AMD_DIST_UP and fpLongAcceptance ? "AMD" : "NA") :
+          (fpShortAbsorptionConfirm ? "ABS" : fpShortInitiativeConfirm ? "INIT" : fpShortImmediateDrive ? "DRIVE" : amdState == AMD_DIST_DN and fpShortAcceptance ? "AMD" : "NA")) +
+     "|FPRJ=" + ((sideTag == "L" ? longFlowRejected : shortFlowRejected) ? "1" : "0") +
+     "|STY=" + str.tostring(storyState) +
+     "|STC=" + str.tostring(storyCause) +
+     "|STO=" + str.tostring(storyOriginCause) +
+     "|STR=" + str.tostring(storyCauseRevisions) +
+     "|CHQ=" + str.tostring(storyChallengeQuality) +
+     "|CHB=" + str.tostring(storyChallengeBars) +
+     "|CHD=" + f_num(storyChallengeDepthAtr, "#.###") +
+     "|CHR=" + f_num(storyChallengeReclaimFrac, "#.###") +
+     "|CHE=" + f_num(storyChallengePeakOppEffort, "#.###") +
+     "|CHO=" + f_num(storyChallengePeakOppResult, "#.###") +
+     "|CHP=" + (storyChallengeSawPoorResult ? "1" : "0") +
+     "|CHA=" + (storyChallengeSawAbsorption ? "1" : "0") +
+     "|CHV=" + (storyChallengeSawValueMigration ? "1" : "0") +
+     "|CHT=" + (storyChallengeSawTerritory ? "1" : "0") +
+     "|STG=" + str.tostring(storyStageCode) +
+     "|PST=" + str.tostring(storyParticipationState) +
+     "|STA=" + f_num(storyAnchor, format.mintick) +
+     "|STD=" + f_num(storyDistanceAtr, "#.###") +
+     "|CAP=" + f_num(storyCapacityPts, "#.##") +
+     "|QRISK=" + f_num(storyQuestionRiskPts, "#.###") +
+     "|QTGT=" + f_num(storyQuestionTargetPts, "#.###") +
+     "|QATR=" + f_num(storyQuestionTargetAtr, "#.###") +
+     "|QINV=" + f_num(storyQuestionInvalid, format.mintick) +
+     "|QPATH=" + (storyPathCanPay ? "1" : "0") +
+     "|QENG=" + (storyEngineCanPay ? "1" : "0") +
+     "|QOK=" + (storyPayoffReady ? "1" : "0") +
+     "|QMODE=" + (storyHasFreshChallenge ? "COUNTER" : "ANCHOR") +
+     "|SVW=" + f_num(busRthVwap, format.mintick) +
+     auditSnapshot
+var int episodeSide = SIDE_NONE
+var int episodeStartBar = na
+var int episodeQuietBars = 0
+var bool episodeUsed = false
+var string episodeReason = ""
+var int dirMemorySide = SIDE_NONE
+var bool dirMemoryConsumed = false
+var float dirMemoryAnchor = na
+var int dirMemoryCause = STORY_CAUSE_NONE
+var int dirMemoryTradeBar = na
+var bool dirMemoryBalanceSeen = false
+var bool dirMemoryOppControlSeen = false
+var int dirMemorySameSideCount = 0
+var bool shortMaturityWait = false
+var bool shortPullbackSeen = false
+var float shortMaturityLow = na
+var int shortMaturityBar = na
+var bool longControlWait = false
+var bool shortControlWait = false
+var bool longControlRearm = false
+var bool shortControlRearm = false
+var int pendingSide = SIDE_NONE
+var float armTrigger = na
+var float armInvalid = na
+var float armTarget = na
+var int armBar = na
+var string armReason = ""
+var string armMeta = ""
+var int armRefreshCount = 0
+var float armQuickAtr = na
+var float armQuickObjectivePts = na
+var float armExecInvalid = na
+var int armStoryCause = STORY_CAUSE_NONE
+var float armStoryAnchor = na
+var int flowWatchSide = SIDE_NONE
+var int flowWatchBar = na
+var float tradeEntry = na
+var float tradeStop = na
+var float tradeTarget = na
+var int tradeEntryBar = na
+var string tradeReason = ""
+var string tradeMeta = ""
+var float tradeQuickAtr = na
+var float tradeQuickObjectivePts = na
+var bool tradeMovePaid = false
+var int tradeMovePaidBar = na
+var float tradePeakMovePts = 0.0
+var float tradeExecInvalid = na
+var bool activeIsReentry = false
+var bool continuationWatch = false
+var int continuationSide = SIDE_NONE
+var int continuationExitBar = na
+var bool continuationAttempted = false
+var bool continuationResetSeen = false
+var int continuationResetBar = na
+var float continuationResetExtreme = na
+var int reentryPendingSide = SIDE_NONE
+var float reentryTrigger = na
+var float reentryInvalid = na
+var float reentryTarget = na
+var int reentryArmBar = na
+var string reentryReason = ""
+var int tradeLifeState = LIFE_NONE
+var int tradeLifeStateBar = na
+var int tradeLifeExhaustBars = 0
+var float tradeProfitFloor = na
+var float tradePrevPeakMovePts = 0.0
+var float tradeInitialRisk = na
+var float tradeMfeR = na
+var float tradeMaeR = na
+var bool tradeProved05 = false
+var bool tradeProved075 = false
+var bool tradeProved100 = false
+var int tradeProof05Bar = na
+var float tradeCloseR = na
+var float tradeGivebackR = na
+var int tradeProtectEvidence = 0
+var int tradeProtectCode = 0
+var int lastProtectCode = 0
+var int tradeControlState = CT_UNPROVEN
+var int tradeControlEventId = 0
+var int tradeControlLastEvent = CT_EVT_NONE
+var int tradeControlChallengeCode = CT_EVT_NONE
+var int tradeControlChallengeBar = na
+var int tradeControlTransferBar = na
+var float tradeControlChallengeOrigin = na
+var float tradeControlChallengeExtreme = na
+var bool tradeControlResponseSeen = false
+var int tradeControlChallengeCount = 0
+var int tradeControlRecoveryCount = 0
+var int tradeControlProtectEvent = CT_EVT_NONE
+var int lastControlProtectEvent = CT_EVT_NONE
+var int tradeControlTransferPath = CT_PATH_NONE
+var float tradeControlTransferExtreme = na
+var string lastExitText = "—"
+var float lastExitPrice = na
+var int lastClosedSeen = 0
+var string actionText = "WAIT"
+var string internalNote = ""
+bool eventArmLong = false
+bool eventArmShort = false
+bool eventEnterLong = false
+bool eventEnterShort = false
+bool eventReenterLong = false
+bool eventReenterShort = false
+bool eventExitAgain = false
+bool eventExitTarget = false
+bool eventStop = false
+bool eventExitEarly = false
+bool eventExitProtect = false
+bool eventExitTime = false
+bool newLongPosition = strategy.position_size > 0 and strategy.position_size[1] <= 0
+bool newShortPosition = strategy.position_size < 0 and strategy.position_size[1] >= 0
+bool newPosition = newLongPosition or newShortPosition
+bool fillingReentry = newPosition and reentryPendingSide != SIDE_NONE
+if newPosition
+    activeIsReentry := fillingReentry
+    tradeEntry := strategy.position_avg_price
+    tradeEntryBar := bar_index
+    if fillingReentry
+        tradeStop := reentryInvalid
+        tradeExecInvalid := na
+        tradeTarget := newLongPosition ? tradeEntry + reentryTargetPts : tradeEntry - reentryTargetPts
+        tradeReason := reentryReason
+        tradeMeta := "REENTRY"
+        tradeQuickAtr := atr
+        tradeQuickObjectivePts := reentryTargetPts
+    else
+        tradeStop := armInvalid
+        tradeExecInvalid := armExecInvalid
+        tradeTarget := armTarget
+        tradeReason := armReason
+        tradeMeta := armMeta
+        tradeQuickAtr := armQuickAtr
+        tradeQuickObjectivePts := armQuickObjectivePts
+    tradeInitialRisk := newLongPosition ?
+         math.max(tradeEntry - tradeStop, tick) :
+         math.max(tradeStop - tradeEntry, tick)
+    tradeMfeR := 0.0
+    tradeMaeR := 0.0
+    tradeProved05 := false
+    tradeProved075 := false
+    tradeProved100 := false
+    tradeProof05Bar := na
+    tradeCloseR := 0.0
+    tradeGivebackR := 0.0
+    tradeProtectEvidence := 0
+    tradeProtectCode := 0
+    tradeControlState := CT_UNPROVEN
+    tradeControlEventId := 0
+    tradeControlLastEvent := CT_EVT_NONE
+    tradeControlChallengeCode := CT_EVT_NONE
+    tradeControlChallengeBar := na
+    tradeControlTransferBar := na
+    tradeControlChallengeOrigin := na
+    tradeControlChallengeExtreme := na
+    tradeControlResponseSeen := false
+    tradeControlChallengeCount := 0
+    tradeControlRecoveryCount := 0
+    tradeControlProtectEvent := CT_EVT_NONE
+    tradeControlTransferPath := CT_PATH_NONE
+    tradeControlTransferExtreme := na
+    tradeMovePaid := false
+    tradeMovePaidBar := na
+    tradePeakMovePts := 0.0
+    tradePrevPeakMovePts := 0.0
+    tradeLifeState := activeIsReentry ? LIFE_HEALTHY : LIFE_PROVING
+    tradeLifeStateBar := bar_index
+    tradeLifeExhaustBars := 0
+    tradeProfitFloor := na
+    flowWatchSide := SIDE_NONE
+    flowWatchBar := na
+    if fillingReentry
+        eventReenterLong := newLongPosition
+        eventReenterShort := newShortPosition
+        actionText := newLongPosition ? "ENTER AGAIN CALL" : "ENTER AGAIN PUT"
+        continuationWatch := false
+        continuationAttempted := true
+        continuationResetSeen := false
+        continuationResetBar := na
+        continuationResetExtreme := na
+        reentryTarget := tradeTarget
+        reentryPendingSide := SIDE_NONE
+        reentryTrigger := na
+        reentryInvalid := na
+        reentryArmBar := na
+        reentryReason := ""
+    else
+        eventEnterLong := newLongPosition
+        eventEnterShort := newShortPosition
+        actionText := newLongPosition ? "ENTER CALL" : "ENTER PUT"
+        continuationWatch := false
+        continuationSide := SIDE_NONE
+        continuationExitBar := na
+        continuationAttempted := false
+        continuationResetSeen := false
+        continuationResetBar := na
+        continuationResetExtreme := na
+        pendingSide := SIDE_NONE
+        armTrigger := na
+        armExecInvalid := na
+        armTarget := na
+        armBar := na
+        armMeta := ""
+        armRefreshCount := 0
+        armQuickAtr := na
+        armQuickObjectivePts := na
+if pendingSide == SIDE_LONG and not na(armInvalid)
+    strategy.exit("L-X", from_entry="L", stop=armInvalid,
+         comment_loss="STOP", alert_loss=f_autoExit("STOP", "PRIMARY"))
+if pendingSide == SIDE_SHORT and not na(armInvalid)
+    strategy.exit("S-X", from_entry="S", stop=armInvalid,
+         comment_loss="STOP", alert_loss=f_autoExit("STOP", "PRIMARY"))
+if reentryPendingSide == SIDE_LONG and not na(reentryInvalid) and not na(reentryTarget)
+    strategy.exit("L2-X", from_entry="L2", stop=reentryInvalid, limit=reentryTarget,
+         comment_profit="SELL AGAIN", comment_loss="STOP AGAIN",
+         alert_profit=f_autoExit("REENTRY_TARGET", "REENTRY"), alert_loss=f_autoExit("REENTRY_STOP", "REENTRY"))
+if reentryPendingSide == SIDE_SHORT and not na(reentryInvalid) and not na(reentryTarget)
+    strategy.exit("S2-X", from_entry="S2", stop=reentryInvalid, limit=reentryTarget,
+         comment_profit="SELL AGAIN", comment_loss="STOP AGAIN",
+         alert_profit=f_autoExit("REENTRY_TARGET", "REENTRY"), alert_loss=f_autoExit("REENTRY_STOP", "REENTRY"))
+if strategy.position_size > 0 and not activeIsReentry and not na(tradeStop)
+    bool longFlowStopActive = enableFlowExecutionStop and tradePrevPeakMovePts < lifeProofPts and
+         not na(tradeExecInvalid) and tradeExecInvalid > tradeStop
+    float longBaseStop = longFlowStopActive ? math.max(tradeStop, tradeExecInvalid) : tradeStop
+    float liveLongStop = not na(tradeProfitFloor) ? math.max(longBaseStop, tradeProfitFloor) : longBaseStop
+    if not na(tradeProfitFloor) and liveLongStop >= tradeProfitFloor and tradeProfitFloor > longBaseStop
+        strategy.exit("L-X", from_entry="L", stop=liveLongStop,
+             comment_loss="LOCK_FLOOR", alert_loss=f_autoExit("LOCK_FLOOR", "PRIMARY"))
+    else if longFlowStopActive
+        strategy.exit("L-X", from_entry="L", stop=liveLongStop,
+             comment_loss="FLOW_STOP", alert_loss=f_autoExit("FLOW_STOP", "PRIMARY"))
+    else
+        strategy.exit("L-X", from_entry="L", stop=liveLongStop,
+             comment_loss="STOP", alert_loss=f_autoExit("STOP", "PRIMARY"))
+if strategy.position_size < 0 and not activeIsReentry and not na(tradeStop)
+    bool shortFlowStopActive = enableFlowExecutionStop and tradePrevPeakMovePts < lifeProofPts and
+         not na(tradeExecInvalid) and tradeExecInvalid < tradeStop
+    float shortBaseStop = shortFlowStopActive ? math.min(tradeStop, tradeExecInvalid) : tradeStop
+    float liveShortStop = not na(tradeProfitFloor) ? math.min(shortBaseStop, tradeProfitFloor) : shortBaseStop
+    if not na(tradeProfitFloor) and liveShortStop <= tradeProfitFloor and tradeProfitFloor < shortBaseStop
+        strategy.exit("S-X", from_entry="S", stop=liveShortStop,
+             comment_loss="LOCK_FLOOR", alert_loss=f_autoExit("LOCK_FLOOR", "PRIMARY"))
+    else if shortFlowStopActive
+        strategy.exit("S-X", from_entry="S", stop=liveShortStop,
+             comment_loss="FLOW_STOP", alert_loss=f_autoExit("FLOW_STOP", "PRIMARY"))
+    else
+        strategy.exit("S-X", from_entry="S", stop=liveShortStop,
+             comment_loss="STOP", alert_loss=f_autoExit("STOP", "PRIMARY"))
+if strategy.position_size > 0 and activeIsReentry and not na(tradeStop) and not na(tradeTarget)
+    strategy.exit("L2-X", from_entry="L2", stop=tradeStop, limit=tradeTarget,
+         comment_profit="SELL AGAIN", comment_loss="STOP AGAIN",
+         alert_profit=f_autoExit("REENTRY_TARGET", "REENTRY"), alert_loss=f_autoExit("REENTRY_STOP", "REENTRY"))
+if strategy.position_size < 0 and activeIsReentry and not na(tradeStop) and not na(tradeTarget)
+    strategy.exit("S2-X", from_entry="S2", stop=tradeStop, limit=tradeTarget,
+         comment_profit="SELL AGAIN", comment_loss="STOP AGAIN",
+         alert_profit=f_autoExit("REENTRY_TARGET", "REENTRY"), alert_loss=f_autoExit("REENTRY_STOP", "REENTRY"))
+int currentPropDayStamp = time("1D", "0000-2359:1234567", TRADE_TZ)
+bool newPropDay =
+     not na(currentPropDayStamp) and
+     (na(propDayStamp) or currentPropDayStamp != propDayStamp)
+if newPropDay
+    propDayStamp := currentPropDayStamp
+    propDailyRealizedR := 0.0
+    propDailyStops := 0
+    propShieldActive := false
+    dirMemorySide := SIDE_NONE
+    dirMemoryConsumed := false
+    dirMemoryAnchor := na
+    dirMemoryCause := STORY_CAUSE_NONE
+    dirMemoryTradeBar := na
+    dirMemoryBalanceSeen := false
+    dirMemoryOppControlSeen := false
+    dirMemorySameSideCount := 0
+
+// A filled MAIN trade consumes the directional information that justified it.
+// A later same-side entry must therefore demonstrate a real auction reset.
+if newPosition and not fillingReentry
+    int filledMemorySide = newLongPosition ? SIDE_LONG : SIDE_SHORT
+    bool sameConsumedDirection = dirMemoryConsumed and dirMemorySide == filledMemorySide
+    dirMemorySameSideCount := sameConsumedDirection ? dirMemorySameSideCount + 1 : 1
+    dirMemorySide := filledMemorySide
+    dirMemoryConsumed := true
+    dirMemoryAnchor := armStoryAnchor
+    dirMemoryCause := armStoryCause
+    dirMemoryTradeBar := bar_index
+    dirMemoryBalanceSeen := false
+    dirMemoryOppControlSeen := false
+
+// While flat, remember whether the old directional auction genuinely reset.
+// These observations do not themselves create a trade.
+if strategy.position_size == 0 and dirMemoryConsumed
+    bool neutralResetNow =
+         (auctionCode == AUC_BALANCE or auctionCode == AUC_CHOP) and
+         not (longControlNow and not shortControlNow) and
+         not (shortControlNow and not longControlNow)
+    if neutralResetNow
+        dirMemoryBalanceSeen := true
+
+    bool oppositeControlNow = dirMemorySide == SIDE_LONG ?
+         (shortControlNow and not longControlNow) :
+         dirMemorySide == SIDE_SHORT ?
+         (longControlNow and not shortControlNow) : false
+    if oppositeControlNow
+        dirMemoryOppControlSeen := true
+if strategy.closedtrades > lastShieldClosedSeen
+    int shieldIdx = strategy.closedtrades - 1
+    string shieldExitComment = strategy.closedtrades.exit_comment(shieldIdx)
+    float shieldExitPrice = strategy.closedtrades.exit_price(shieldIdx)
+    string shieldEntryId = strategy.closedtrades.entry_id(shieldIdx)
+    float resolvedR = 0.0
+    if not na(tradeInitialRisk) and tradeInitialRisk > 0 and not na(tradeEntry)
+        bool shieldWasLong = str.startswith(shieldEntryId, "L")
+        resolvedR := shieldWasLong ?
+             (shieldExitPrice - tradeEntry) / tradeInitialRisk :
+             (tradeEntry - shieldExitPrice) / tradeInitialRisk
+    propDailyRealizedR += resolvedR
+    if shieldExitComment == "STOP"
+        propDailyStops += 1
+        if enableDailyShield and propDailyRealizedR <= 0.0
+            propShieldActive := true
+            strategy.cancel_all()
+    lastShieldClosedSeen := strategy.closedtrades
+bool canReasonThisBar = barstate.isconfirmed and not newPosition
+if canReasonThisBar
+    internalNote := ""
+    if preBlackoutBar
+        strategy.cancel_all()
+        if strategy.position_size != 0
+            strategy.close_all(comment="TIME", alert_message=f_autoExit("TIME_BLOCK", "PRIMARY"))
+        pendingSide := SIDE_NONE
+        armTrigger := na
+        armInvalid := na
+        armExecInvalid := na
+        armTarget := na
+        armBar := na
+        armReason := ""
+        armMeta := ""
+        armRefreshCount := 0
+        episodeSide := SIDE_NONE
+        episodeStartBar := na
+        episodeQuietBars := 0
+        episodeUsed := false
+        episodeReason := ""
+        shortMaturityWait := false
+        shortPullbackSeen := false
+        shortMaturityLow := na
+        shortMaturityBar := na
+        longControlWait := false
+        shortControlWait := false
+        longControlRearm := false
+        shortControlRearm := false
+        continuationWatch := false
+        continuationSide := SIDE_NONE
+        continuationExitBar := na
+        continuationAttempted := false
+        continuationResetSeen := false
+        continuationResetBar := na
+        continuationResetExtreme := na
+        reentryPendingSide := SIDE_NONE
+        reentryTrigger := na
+        reentryInvalid := na
+        reentryTarget := na
+        reentryArmBar := na
+        reentryReason := ""
+        actionText := strategy.position_size != 0 ? "EXIT TIME BLOCK" : "NO TRADE 00–04 PT"
+        internalNote := "MIDNIGHT–4AM PACIFIC HARD BLOCK"
+    else if noTradeWindow
+        strategy.cancel_all()
+        if strategy.position_size != 0
+            strategy.close_all(comment="TIME", alert_message=f_autoExit("TIME_BLOCK", "PRIMARY"))
+        pendingSide := SIDE_NONE
+        armTrigger := na
+        armInvalid := na
+        armExecInvalid := na
+        armTarget := na
+        armBar := na
+        armReason := ""
+        armMeta := ""
+        armRefreshCount := 0
+        episodeSide := SIDE_NONE
+        episodeStartBar := na
+        episodeQuietBars := 0
+        episodeUsed := false
+        episodeReason := ""
+        shortMaturityWait := false
+        shortPullbackSeen := false
+        shortMaturityLow := na
+        shortMaturityBar := na
+        longControlWait := false
+        shortControlWait := false
+        longControlRearm := false
+        shortControlRearm := false
+        continuationWatch := false
+        continuationSide := SIDE_NONE
+        continuationExitBar := na
+        continuationAttempted := false
+        continuationResetSeen := false
+        continuationResetBar := na
+        continuationResetExtreme := na
+        reentryPendingSide := SIDE_NONE
+        reentryTrigger := na
+        reentryInvalid := na
+        reentryTarget := na
+        reentryArmBar := na
+        reentryReason := ""
+        actionText := "NO TRADE 00–04 PT"
+        internalNote := "MIDNIGHT–4AM PACIFIC HARD BLOCK"
+    else if (sessionTransitionWindow or sessionTransitionBoundary) and strategy.position_size == 0
+        strategy.cancel_all()
+        pendingSide := SIDE_NONE
+        armTrigger := na
+        armInvalid := na
+        armExecInvalid := na
+        armTarget := na
+        armBar := na
+        armReason := ""
+        armMeta := ""
+        armRefreshCount := 0
+        episodeSide := SIDE_NONE
+        episodeStartBar := na
+        episodeQuietBars := 0
+        episodeUsed := false
+        episodeReason := ""
+        shortMaturityWait := false
+        shortPullbackSeen := false
+        shortMaturityLow := na
+        shortMaturityBar := na
+        longControlWait := false
+        shortControlWait := false
+        longControlRearm := false
+        shortControlRearm := false
+        continuationWatch := false
+        continuationSide := SIDE_NONE
+        continuationExitBar := na
+        continuationAttempted := false
+        continuationResetSeen := false
+        continuationResetBar := na
+        continuationResetExtreme := na
+        reentryPendingSide := SIDE_NONE
+        reentryTrigger := na
+        reentryInvalid := na
+        reentryTarget := na
+        reentryArmBar := na
+        reentryReason := ""
+        actionText := preRthTransition or preRthBoundaryBar ?
+             "WAIT — RTH OPEN TRANSITION" :
+             "WAIT — CASH CLOSE TRANSITION"
+        internalNote := "SESSION BOUNDARY · REBUILD REASONING AFTER TRANSITION"
+    else if strategy.position_size != 0
+        if not na(tradeInitialRisk) and tradeInitialRisk > 0
+            float liveFavR = strategy.position_size > 0 ?
+                 (high - tradeEntry) / tradeInitialRisk :
+                 (tradeEntry - low) / tradeInitialRisk
+            float liveAdvR = strategy.position_size > 0 ?
+                 (tradeEntry - low) / tradeInitialRisk :
+                 (high - tradeEntry) / tradeInitialRisk
+            tradeMfeR := na(tradeMfeR) ? math.max(liveFavR, 0.0) : math.max(tradeMfeR, liveFavR)
+            tradeMaeR := na(tradeMaeR) ? math.max(liveAdvR, 0.0) : math.max(tradeMaeR, liveAdvR)
+            bool newlyProved05 = not tradeProved05 and tradeMfeR >= PROVEN_R
+            tradeProved05 := tradeProved05 or tradeMfeR >= PROVEN_R
+            tradeProved075 := tradeProved075 or tradeMfeR >= 0.75
+            tradeProved100 := tradeProved100 or tradeMfeR >= 1.00
+            if newlyProved05
+                tradeProof05Bar := bar_index
+                tradeControlState := CT_PROVEN
+                tradeControlLastEvent := CT_EVT_NONE
+            tradeCloseR := strategy.position_size > 0 ?
+                 (close - tradeEntry) / tradeInitialRisk :
+                 (tradeEntry - close) / tradeInitialRisk
+            tradeGivebackR := math.max(0.0, tradeMfeR - tradeCloseR)
+            float liveMovePts = tradeMfeR * tradeInitialRisk
+            tradePrevPeakMovePts := tradePeakMovePts
+            tradePeakMovePts := math.max(tradePeakMovePts, liveMovePts)
+            if activeIsReentry
+                tradeProfitFloor := na
+            if not tradeMovePaid and liveMovePts >= moveMilestonePts
+                tradeMovePaid := true
+                tradeMovePaidBar := bar_index
+        int heldBars = na(tradeEntryBar) ? 0 : bar_index - tradeEntryBar
+        bool longProtectTerritory = strategy.position_size > 0 and dnTerritory
+        bool longProtectEffort = strategy.position_size > 0 and (sellerSponsored or (buyerPoorResult and sellerResult >= 0.14))
+        bool longProtectCounter = strategy.position_size > 0 and buyerCounterWeak
+        bool longProtectAuction = strategy.position_size > 0 and (auctionCode == AUC_FAIL_UP or auctionCode == AUC_EXP_DN)
+        bool longProtectContradiction = strategy.position_size > 0 and bullContradicted
+        bool shortProtectTerritory = strategy.position_size < 0 and upTerritory
+        bool shortProtectEffort = strategy.position_size < 0 and (buyerSponsored or (sellerPoorResult and buyerResult >= 0.14))
+        bool shortProtectCounter = strategy.position_size < 0 and sellerCounterWeak
+        bool shortProtectAuction = strategy.position_size < 0 and (auctionCode == AUC_FAIL_DN or auctionCode == AUC_EXP_UP)
+        bool shortProtectContradiction = strategy.position_size < 0 and bearContradicted
+        tradeProtectEvidence := strategy.position_size > 0 ?
+             (longProtectTerritory ? 1 : 0) +
+             (longProtectEffort ? 1 : 0) +
+             (longProtectCounter ? 1 : 0) +
+             (longProtectAuction ? 1 : 0) +
+             (longProtectContradiction ? 1 : 0) :
+             (shortProtectTerritory ? 1 : 0) +
+             (shortProtectEffort ? 1 : 0) +
+             (shortProtectCounter ? 1 : 0) +
+             (shortProtectAuction ? 1 : 0) +
+             (shortProtectContradiction ? 1 : 0)
+        tradeProtectCode := strategy.position_size > 0 ?
+             (longProtectTerritory ? 1 : 0) +
+             (longProtectEffort ? 2 : 0) +
+             (longProtectCounter ? 4 : 0) +
+             (longProtectAuction ? 8 : 0) +
+             (longProtectContradiction ? 16 : 0) :
+             (shortProtectTerritory ? 1 : 0) +
+             (shortProtectEffort ? 2 : 0) +
+             (shortProtectCounter ? 4 : 0) +
+             (shortProtectAuction ? 8 : 0) +
+             (shortProtectContradiction ? 16 : 0)
+        bool proofWasEstablished =
+             (tradeMovePaid and not na(tradeMovePaidBar) and bar_index > tradeMovePaidBar) or
+             (tradeProved05 and not na(tradeProof05Bar) and bar_index > tradeProof05Bar)
+        bool meaningfulGiveback = not na(tradeGivebackR) and tradeGivebackR >= PROTECT_GIVEBACK_R
+        bool longFailure =
+             strategy.position_size > 0 and
+             heldBars >= minEarlyBars and
+             ((bullContradicted and (dnTerritory or sellerSponsored)) or
+              (auctionCode == AUC_FAIL_UP and dnTerritory) or
+              (buyerPoorResult and sellerSponsored and close < tradeEntry))
+        bool shortFailure =
+             strategy.position_size < 0 and
+             heldBars >= minEarlyBars and
+             ((bearContradicted and (upTerritory or buyerSponsored)) or
+              (auctionCode == AUC_FAIL_DN and upTerritory) or
+              (sellerPoorResult and buyerSponsored and close > tradeEntry))
+        bool longChallengeStructure = strategy.position_size > 0 and acceptedBelowS
+        bool longChallengeFailedAuction = strategy.position_size > 0 and auctionCode == AUC_FAIL_UP
+        bool longChallengeDrive = strategy.position_size > 0 and dnTerritory and (sellerSponsored or sellerResult >= 0.40)
+        bool longChallengeEffortResult = strategy.position_size > 0 and buyerPoorResult and sellerResult >= 0.14 and close < close[1]
+        bool shortChallengeStructure = strategy.position_size < 0 and acceptedAboveR
+        bool shortChallengeFailedAuction = strategy.position_size < 0 and auctionCode == AUC_FAIL_DN
+        bool shortChallengeDrive = strategy.position_size < 0 and upTerritory and (buyerSponsored or buyerResult >= 0.40)
+        bool shortChallengeEffortResult = strategy.position_size < 0 and sellerPoorResult and buyerResult >= 0.14 and close > close[1]
+        int adverseEventCode = strategy.position_size > 0 ?
+             (longChallengeStructure ? CT_EVT_STRUCTURE :
+              longChallengeFailedAuction ? CT_EVT_FAILED_AUCTION :
+              longChallengeDrive ? CT_EVT_DRIVE :
+              longChallengeEffortResult ? CT_EVT_EFFORT_RESULT : CT_EVT_NONE) :
+             (shortChallengeStructure ? CT_EVT_STRUCTURE :
+              shortChallengeFailedAuction ? CT_EVT_FAILED_AUCTION :
+              shortChallengeDrive ? CT_EVT_DRIVE :
+              shortChallengeEffortResult ? CT_EVT_EFFORT_RESULT : CT_EVT_NONE)
+        bool adverseEvent = adverseEventCode != CT_EVT_NONE
+        bool longResponseEvent = strategy.position_size > 0 and
+             ((upTerritory and buyerResult >= 0.18) or
+              (buyerSponsored and not dnTerritory) or
+              auctionCode == AUC_FAIL_DN or sweptSFailed or balanceReclaimUp or rejectedAtS)
+        bool shortResponseEvent = strategy.position_size < 0 and
+             ((dnTerritory and sellerResult >= 0.18) or
+              (sellerSponsored and not upTerritory) or
+              auctionCode == AUC_FAIL_UP or sweptRFailed or balanceReclaimDn or rejectedAtR)
+        bool longReclaimedOrigin = strategy.position_size > 0 and not na(tradeControlChallengeOrigin) and close >= tradeControlChallengeOrigin
+        bool shortReclaimedOrigin = strategy.position_size < 0 and not na(tradeControlChallengeOrigin) and close <= tradeControlChallengeOrigin
+        bool longRecoveryConfirmed = longResponseEvent and
+             (longReclaimedOrigin or auctionCode == AUC_FAIL_DN or sweptSFailed or balanceReclaimUp or
+              (upTerritory and buyerResult >= 0.40))
+        bool shortRecoveryConfirmed = shortResponseEvent and
+             (shortReclaimedOrigin or auctionCode == AUC_FAIL_UP or sweptRFailed or balanceReclaimDn or
+              (dnTerritory and sellerResult >= 0.40))
+        bool recoveryConfirmed = strategy.position_size > 0 ? longRecoveryConfirmed : shortRecoveryConfirmed
+        bool responseEvent = strategy.position_size > 0 ? longResponseEvent : shortResponseEvent
+        bool longOpponentRetains = strategy.position_size > 0 and not na(tradeControlChallengeOrigin) and
+             close < tradeControlChallengeOrigin and
+             (dnTerritory or dnHolding or sellerSponsored) and not longRecoveryConfirmed
+        bool shortOpponentRetains = strategy.position_size < 0 and not na(tradeControlChallengeOrigin) and
+             close > tradeControlChallengeOrigin and
+             (upTerritory or upHolding or buyerSponsored) and not shortRecoveryConfirmed
+        bool opponentRetains = strategy.position_size > 0 ? longOpponentRetains : shortOpponentRetains
+        bool longResponseFailure = strategy.position_size > 0 and tradeControlState == CT_RECOVERING and
+             not na(tradeControlChallengeOrigin) and close < tradeControlChallengeOrigin and
+             (dnTerritory or sellerSponsored or auctionCode == AUC_EXP_DN) and not longRecoveryConfirmed
+        bool shortResponseFailure = strategy.position_size < 0 and tradeControlState == CT_RECOVERING and
+             not na(tradeControlChallengeOrigin) and close > tradeControlChallengeOrigin and
+             (upTerritory or buyerSponsored or auctionCode == AUC_EXP_UP) and not shortRecoveryConfirmed
+        bool responseFailure = strategy.position_size > 0 ? longResponseFailure : shortResponseFailure
+        bool longStructuralAcceptance = strategy.position_size > 0 and acceptedBelowS
+        bool shortStructuralAcceptance = strategy.position_size < 0 and acceptedAboveR
+        bool longOriginAcceptance = strategy.position_size > 0 and not na(tradeControlChallengeOrigin) and
+             close < tradeControlChallengeOrigin and close[1] < tradeControlChallengeOrigin and
+             (dnTerritory or dnHolding or sellerSponsored)
+        bool shortOriginAcceptance = strategy.position_size < 0 and not na(tradeControlChallengeOrigin) and
+             close > tradeControlChallengeOrigin and close[1] > tradeControlChallengeOrigin and
+             (upTerritory or upHolding or buyerSponsored)
+        bool longAdverseAcceptance = strategy.position_size > 0 and not na(tradeControlChallengeOrigin) and
+             (longStructuralAcceptance or longOriginAcceptance)
+        bool shortAdverseAcceptance = strategy.position_size < 0 and not na(tradeControlChallengeOrigin) and
+             (shortStructuralAcceptance or shortOriginAcceptance)
+        bool adverseStructuralAcceptance = strategy.position_size > 0 ? longStructuralAcceptance : shortStructuralAcceptance
+        bool adverseOriginAcceptance = strategy.position_size > 0 ? longOriginAcceptance : shortOriginAcceptance
+        bool adverseAcceptance = strategy.position_size > 0 ? longAdverseAcceptance : shortAdverseAcceptance
+        bool longAdverseContinuation = strategy.position_size > 0 and longOpponentRetains and
+             (sellerSponsored or auctionCode == AUC_EXP_DN)
+        bool shortAdverseContinuation = strategy.position_size < 0 and shortOpponentRetains and
+             (buyerSponsored or auctionCode == AUC_EXP_UP)
+        bool adverseContinuation = strategy.position_size > 0 ? longAdverseContinuation : shortAdverseContinuation
+        bool longTransferProgress = strategy.position_size > 0 and
+             tradeControlState == CT_TRANSFER_BUILDING and
+             not na(tradeControlTransferExtreme) and
+             close < tradeControlTransferExtreme and
+             (dnTerritory or sellerSponsored or auctionCode == AUC_EXP_DN)
+        bool shortTransferProgress = strategy.position_size < 0 and
+             tradeControlState == CT_TRANSFER_BUILDING and
+             not na(tradeControlTransferExtreme) and
+             close > tradeControlTransferExtreme and
+             (upTerritory or buyerSponsored or auctionCode == AUC_EXP_UP)
+        bool transferProgress = strategy.position_size > 0 ? longTransferProgress : shortTransferProgress
+        if tradeControlState == CT_CHALLENGED or tradeControlState == CT_RECOVERING or tradeControlState == CT_TRANSFER_BUILDING
+            tradeControlChallengeExtreme := strategy.position_size > 0 ?
+                 (na(tradeControlChallengeExtreme) ? low : math.min(tradeControlChallengeExtreme, low)) :
+                 (na(tradeControlChallengeExtreme) ? high : math.max(tradeControlChallengeExtreme, high))
+        bool provenProtection = false
+        if enableProvenProtection and proofWasEstablished
+            if tradeControlState == CT_UNPROVEN
+                tradeControlState := CT_PROVEN
+            if tradeControlState == CT_PROVEN
+                if meaningfulGiveback and adverseEvent and not longFailure and not shortFailure
+                    tradeControlState := CT_CHALLENGED
+                    tradeControlEventId += 1
+                    tradeControlLastEvent := adverseEventCode
+                    tradeControlChallengeCode := adverseEventCode
+                    tradeControlChallengeBar := bar_index
+                    tradeControlTransferBar := na
+                    tradeControlChallengeOrigin := close[1]
+                    tradeControlChallengeExtreme := strategy.position_size > 0 ? low : high
+                    tradeControlResponseSeen := false
+                    tradeControlChallengeCount += 1
+                    tradeControlProtectEvent := CT_EVT_NONE
+                    tradeControlTransferPath := CT_PATH_NONE
+                    tradeControlTransferExtreme := na
+            else if tradeControlState == CT_CHALLENGED
+                if recoveryConfirmed
+                    tradeControlEventId += 1
+                    tradeControlLastEvent := CT_EVT_RECOVERY
+                    tradeControlRecoveryCount += 1
+                    tradeControlState := CT_PROVEN
+                    tradeControlChallengeBar := na
+                    tradeControlTransferBar := na
+                    tradeControlChallengeOrigin := na
+                    tradeControlChallengeExtreme := na
+                    tradeControlResponseSeen := false
+                    tradeControlChallengeCode := CT_EVT_NONE
+                    tradeControlTransferPath := CT_PATH_NONE
+                    tradeControlTransferExtreme := na
+                else if responseEvent
+                    tradeControlEventId += 1
+                    tradeControlLastEvent := CT_EVT_RESPONSE
+                    tradeControlResponseSeen := true
+                    tradeControlState := CT_RECOVERING
+                else if opponentRetains
+                    tradeControlEventId += 1
+                    tradeControlLastEvent := CT_EVT_CONTINUATION
+                    tradeControlTransferBar := bar_index
+                    tradeControlTransferPath := CT_PATH_NO_RESPONSE_RETENTION
+                    tradeControlTransferExtreme := strategy.position_size > 0 ? low : high
+                    tradeControlState := CT_TRANSFER_BUILDING
+            else if tradeControlState == CT_RECOVERING
+                if recoveryConfirmed
+                    tradeControlEventId += 1
+                    tradeControlLastEvent := CT_EVT_RECOVERY
+                    tradeControlRecoveryCount += 1
+                    tradeControlState := CT_PROVEN
+                    tradeControlChallengeBar := na
+                    tradeControlTransferBar := na
+                    tradeControlChallengeOrigin := na
+                    tradeControlChallengeExtreme := na
+                    tradeControlResponseSeen := false
+                    tradeControlChallengeCode := CT_EVT_NONE
+                    tradeControlTransferPath := CT_PATH_NONE
+                    tradeControlTransferExtreme := na
+                else if responseFailure
+                    tradeControlEventId += 1
+                    tradeControlLastEvent := CT_EVT_RESPONSE_FAIL
+                    tradeControlTransferBar := bar_index
+                    tradeControlTransferPath := CT_PATH_RESPONSE_FAILURE
+                    tradeControlTransferExtreme := strategy.position_size > 0 ? low : high
+                    tradeControlState := CT_TRANSFER_BUILDING
+            else if tradeControlState == CT_TRANSFER_BUILDING
+                if recoveryConfirmed
+                    tradeControlEventId += 1
+                    tradeControlLastEvent := CT_EVT_RECOVERY
+                    tradeControlRecoveryCount += 1
+                    tradeControlState := CT_PROVEN
+                    tradeControlChallengeBar := na
+                    tradeControlTransferBar := na
+                    tradeControlChallengeOrigin := na
+                    tradeControlChallengeExtreme := na
+                    tradeControlResponseSeen := false
+                    tradeControlChallengeCode := CT_EVT_NONE
+                    tradeControlTransferPath := CT_PATH_NONE
+                    tradeControlTransferExtreme := na
+                else if not na(tradeControlTransferBar) and bar_index > tradeControlTransferBar and
+                     (adverseStructuralAcceptance or transferProgress) and not longFailure and not shortFailure
+                    tradeControlEventId += 1
+                    tradeControlLastEvent := adverseStructuralAcceptance ? CT_EVT_ACCEPTANCE : CT_EVT_CONTINUATION
+                    tradeControlProtectEvent := tradeControlLastEvent
+                    provenProtection := true
+        float closeMovePts = strategy.position_size > 0 ?
+             close - tradeEntry : tradeEntry - close
+        float givebackPts = math.max(0.0, tradePeakMovePts - closeMovePts)
+        bool lifeProvedDistance = tradePeakMovePts >= lifeProofPts
+        bool lifeRunnerDistance = tradePeakMovePts >= lifeRunnerPts
+        bool longLevelFriction =
+             strategy.position_size > 0 and
+             ((r1HardObstacle and nearR) or rejectedAtR or
+              (not na(longMoveRoomPts) and longMoveRoomPts < math.max(0.35, tick * 4.0)))
+        bool shortLevelFriction =
+             strategy.position_size < 0 and
+             ((s1HardObstacle and nearS) or rejectedAtS or
+              (not na(shortMoveRoomPts) and shortMoveRoomPts < math.max(0.35, tick * 4.0)))
+        bool longPriceHealthy = strategy.position_size > 0 and not bullContradicted and not buyerCounterWeak and
+             (upTerritory or upHolding or buyerSponsored or acceptedAboveR or balanceReclaimUp)
+        bool shortPriceHealthy = strategy.position_size < 0 and not bearContradicted and not sellerCounterWeak and
+             (dnTerritory or dnHolding or sellerSponsored or acceptedBelowS or balanceReclaimDn)
+        bool longFlowHealthy = strategy.position_size > 0 and
+             (not fpHas or fpLongSupport or fpLongConstructive or fpSellerAbsorbed or
+              (not fpLongContradiction and not fpLongExhaustion))
+        bool shortFlowHealthy = strategy.position_size < 0 and
+             (not fpHas or fpShortSupport or fpShortConstructive or fpBuyerAbsorbed or
+              (not fpShortContradiction and not fpShortExhaustion))
+        bool longFreshDistribution = strategy.position_size > 0 and amdState == AMD_DIST_UP and
+             not na(amdStateBar) and bar_index - amdStateBar <= 8
+        bool shortFreshDistribution = strategy.position_size < 0 and amdState == AMD_DIST_DN and
+             not na(amdStateBar) and bar_index - amdStateBar <= 8
+        bool longAgingDistribution = strategy.position_size > 0 and amdState == AMD_DIST_UP and
+             not na(amdStateBar) and bar_index - amdStateBar >= 12
+        bool shortAgingDistribution = strategy.position_size < 0 and amdState == AMD_DIST_DN and
+             not na(amdStateBar) and bar_index - amdStateBar >= 12
+        bool longExpandingLife = strategy.position_size > 0 and longPriceHealthy and
+             (auctionCode == AUC_EXP_UP or upTerritory or longFreshDistribution) and
+             buyerResult >= moveMinResult and
+             (not fpHas or fpLongSupport or fpLongConstructive or fpSellerAbsorbed or longFreshDistribution) and
+             not longLevelFriction
+        bool shortExpandingLife = strategy.position_size < 0 and shortPriceHealthy and
+             (auctionCode == AUC_EXP_DN or dnTerritory or shortFreshDistribution) and
+             sellerResult >= moveMinResult and
+             (not fpHas or fpShortSupport or fpShortConstructive or fpBuyerAbsorbed or shortFreshDistribution) and
+             not shortLevelFriction
+        bool longHealthyLife = strategy.position_size > 0 and longPriceHealthy and
+             (longFlowHealthy or amdSupportsLong) and not fpLongContradiction
+        bool shortHealthyLife = strategy.position_size < 0 and shortPriceHealthy and
+             (shortFlowHealthy or amdSupportsShort) and not fpShortContradiction
+        bool longExhaustSignal = strategy.position_size > 0 and
+             (fpLongExhaustion or
+              (buyerPoorResult and (sellerSponsored or dnHolding)) or
+              (longLevelFriction and not fpLongSupport and not fpSellerAbsorbed))
+        bool shortExhaustSignal = strategy.position_size < 0 and
+             (fpShortExhaustion or
+              (sellerPoorResult and (buyerSponsored or upHolding)) or
+              (shortLevelFriction and not fpShortSupport and not fpBuyerAbsorbed))
+        bool longOpponentControl = strategy.position_size > 0 and
+             (longFailure or bullContradicted or
+              (fpLongContradiction and (dnTerritory or sellerSponsored)) or
+              (acceptedBelowS and dnTerritory))
+        bool shortOpponentControl = strategy.position_size < 0 and
+             (shortFailure or bearContradicted or
+              (fpShortContradiction and (upTerritory or buyerSponsored)) or
+              (acceptedAboveR and upTerritory))
+        bool lifeSameSideExpanding = strategy.position_size > 0 ? longExpandingLife : shortExpandingLife
+        bool lifeSameSideHealthy = strategy.position_size > 0 ? longHealthyLife : shortHealthyLife
+        bool lifeExhaustSignal = strategy.position_size > 0 ? longExhaustSignal : shortExhaustSignal
+        bool lifeOpponentControl = strategy.position_size > 0 ? longOpponentControl : shortOpponentControl
+        bool lifeLevelFriction = strategy.position_size > 0 ? longLevelFriction : shortLevelFriction
+        bool lifeAgingDistribution = strategy.position_size > 0 ? longAgingDistribution : shortAgingDistribution
+        if not activeIsReentry
+            if lifeExhaustSignal and lifeProvedDistance
+                tradeLifeExhaustBars += 1
+            else if lifeSameSideExpanding
+                tradeLifeExhaustBars := 0
+            else
+                tradeLifeExhaustBars := math.max(tradeLifeExhaustBars - 1, 0)
+            bool exhaustionConfirmed = tradeLifeExhaustBars >= 2 or
+                 (lifeExhaustSignal and lifeLevelFriction and lifeRunnerDistance)
+            int desiredLife = LIFE_PROVING
+            if lifeOpponentControl
+                desiredLife := LIFE_TRANSFER
+            else if exhaustionConfirmed
+                desiredLife := LIFE_EXHAUSTING
+            else if lifeRunnerDistance and
+                 (lifeLevelFriction or lifeAgingDistribution or
+                  ((auctionCode == AUC_BALANCE or auctionCode == AUC_CHOP) and not lifeSameSideExpanding))
+                desiredLife := LIFE_MATURE
+            else if lifeSameSideExpanding
+                desiredLife := LIFE_EXPANDING
+            else if lifeProvedDistance and lifeSameSideHealthy
+                desiredLife := LIFE_HEALTHY
+            else
+                desiredLife := LIFE_PROVING
+            if desiredLife != tradeLifeState
+                tradeLifeState := desiredLife
+                tradeLifeStateBar := bar_index
+            if tradePrevPeakMovePts >= lifeProofPts
+                float lifeCorridor = tradeLifeState == LIFE_EXPANDING ? lifeWideGivebackPts :
+                     tradeLifeState == LIFE_HEALTHY ? lifeHealthyGivebackPts :
+                     lifeMatureGivebackPts
+                float earnedLockPts = math.max(lifeMinLockedPts, tradePrevPeakMovePts - lifeCorridor)
+                if earnedLockPts > 0
+                    float proposedFloor = strategy.position_size > 0 ?
+                         tradeEntry + earnedLockPts : tradeEntry - earnedLockPts
+                    tradeProfitFloor := na(tradeProfitFloor) ? proposedFloor :
+                         strategy.position_size > 0 ? math.max(tradeProfitFloor, proposedFloor) :
+                         math.min(tradeProfitFloor, proposedFloor)
+        else
+            tradeLifeState := LIFE_HEALTHY
+            tradeLifeStateBar := bar_index
+            tradeLifeExhaustBars := 0
+            tradeProfitFloor := na
+        bool mainFlowFailureLong =
+             not activeIsReentry and strategy.position_size > 0 and
+             tradePrevPeakMovePts < lifeProofPts and
+             ((not na(tradeExecInvalid) and close < tradeExecInvalid) or
+              (fpPocDown and (fpValueDown or fpAggSell) and (dnTerritory or sellerSponsored)) or
+              fpLongEffortRejected or bullContradicted)
+        bool mainFlowFailureShort =
+             not activeIsReentry and strategy.position_size < 0 and
+             tradePrevPeakMovePts < lifeProofPts and
+             ((not na(tradeExecInvalid) and close > tradeExecInvalid) or
+              (fpPocUp and (fpValueUp or fpAggBuy) and (upTerritory or buyerSponsored)) or
+              fpShortEffortRejected or bearContradicted)
+        bool mainFlowFailure = mainFlowFailureLong or mainFlowFailureShort
+        bool longFloorBreached = not activeIsReentry and strategy.position_size > 0 and
+             not na(tradeProfitFloor) and close <= tradeProfitFloor
+        bool shortFloorBreached = not activeIsReentry and strategy.position_size < 0 and
+             not na(tradeProfitFloor) and close >= tradeProfitFloor
+        bool lifeWeakening = lifeExhaustSignal or lifeLevelFriction or lifeOpponentControl or
+             ((auctionCode == AUC_BALANCE or auctionCode == AUC_CHOP) and not lifeSameSideHealthy)
+        bool mainLifeBank =
+             not activeIsReentry and closeMovePts >= lifeMinBankPts and
+             (tradeLifeState == LIFE_EXHAUSTING or tradeLifeState == LIFE_TRANSFER or
+              (tradeLifeState == LIFE_MATURE and givebackPts >= lifeMatureGivebackPts) or
+              (tradeLifeState == LIFE_HEALTHY and lifeWeakening and givebackPts >= lifeHealthyGivebackPts))
+        bool reentryEarlyFailure =
+             activeIsReentry and heldBars >= 1 and
+             ((strategy.position_size > 0 and
+               (bullContradicted or fpLongContradiction or
+                ((sellerSponsored or fpAggSell) and (dnTerritory or buyerPoorResult)) or
+                auctionCode == AUC_FAIL_UP)) or
+              (strategy.position_size < 0 and
+               (bearContradicted or fpShortContradiction or
+                ((buyerSponsored or fpAggBuy) and (upTerritory or sellerPoorResult)) or
+                auctionCode == AUC_FAIL_DN)))
+        if longFloorBreached
+            strategy.close("L", comment="LIFE_FLOOR_BREACH", alert_message=f_autoExit("LIFE_FLOOR_BREACH", "PRIMARY"), immediately=true)
+            actionText := "SELL"
+            internalNote := "EARNED PROFIT FLOOR ALREADY BREACHED · BANK NOW"
+        else if shortFloorBreached
+            strategy.close("S", comment="LIFE_FLOOR_BREACH", alert_message=f_autoExit("LIFE_FLOOR_BREACH", "PRIMARY"), immediately=true)
+            actionText := "SELL"
+            internalNote := "EARNED PROFIT FLOOR ALREADY BREACHED · BANK NOW"
+        else if mainFlowFailure and strategy.position_size > 0
+            strategy.close("L", comment="FLOW_FAIL", alert_message=f_autoExit("FLOW_FAIL", "PRIMARY"), immediately=true)
+            actionText := "SELL"
+            internalNote := "ENTRY PROOF FAILED · LOCAL ACCEPTANCE LOST"
+        else if mainFlowFailure and strategy.position_size < 0
+            strategy.close("S", comment="FLOW_FAIL", alert_message=f_autoExit("FLOW_FAIL", "PRIMARY"), immediately=true)
+            actionText := "SELL"
+            internalNote := "ENTRY PROOF FAILED · LOCAL ACCEPTANCE LOST"
+        else if mainLifeBank and strategy.position_size > 0
+            strategy.close("L", comment="LIFE_BANK", alert_message=f_autoExit("LIFE_BANK", "PRIMARY"), immediately=true)
+            actionText := "SELL"
+            internalNote := "MOVE LIFE " + f_lifeText(tradeLifeState) + " · BANK CALL PROFIT"
+        else if mainLifeBank and strategy.position_size < 0
+            strategy.close("S", comment="LIFE_BANK", alert_message=f_autoExit("LIFE_BANK", "PRIMARY"), immediately=true)
+            actionText := "SELL"
+            internalNote := "MOVE LIFE " + f_lifeText(tradeLifeState) + " · BANK PUT PROFIT"
+        else if reentryEarlyFailure and strategy.position_size > 0
+            strategy.close("L2", comment="SELL AGAIN EARLY", alert_message=f_autoExit("REENTRY_EARLY", "REENTRY"), immediately=true)
+            actionText := "SELL AGAIN"
+            internalNote := "ENTER AGAIN LOST MOVE LIFE BEFORE +$1"
+        else if reentryEarlyFailure and strategy.position_size < 0
+            strategy.close("S2", comment="SELL AGAIN EARLY", alert_message=f_autoExit("REENTRY_EARLY", "REENTRY"), immediately=true)
+            actionText := "SELL AGAIN"
+            internalNote := "ENTER AGAIN LOST MOVE LIFE BEFORE +$1"
+        else if provenProtection and strategy.position_size > 0
+            string protectPathL = tradeControlTransferPath == CT_PATH_RESPONSE_FAILURE ? "RF" : tradeControlTransferPath == CT_PATH_NO_RESPONSE_RETENTION ? "NR" : "NA"
+            string protectConfirmL = adverseStructuralAcceptance ? "STRUCT" : transferProgress ? "PROGRESS" : "NA"
+            string protectCommentL = "PROTECT|CH=" + f_ctEventTag(tradeControlChallengeCode) + "|PATH=" + protectPathL + "|CF=" + protectConfirmL + "|EV=" + f_ctEventTag(tradeControlProtectEvent) + "|OA=" + (adverseOriginAcceptance ? "1" : "0") + "|RS=" + (tradeControlResponseSeen ? "1" : "0") + "|B=" + str.tostring(na(tradeControlChallengeBar) ? 0 : bar_index - tradeControlChallengeBar)
+            if activeIsReentry
+                strategy.close("L2", comment="SELL AGAIN PROTECT", alert_message=f_autoExit("REENTRY_PROTECT", "REENTRY"), immediately=true)
+                actionText := "SELL AGAIN"
+            else
+                strategy.close("L", comment=protectCommentL, alert_message=f_autoExit(protectCommentL, "PRIMARY"), immediately=true)
+                actionText := "SELL"
+            internalNote := "CONTROL TRANSFER · " + f_ctEventText(tradeControlProtectEvent) + " · CHALLENGE " + f_ctEventText(tradeControlChallengeCode)
+        else if provenProtection and strategy.position_size < 0
+            string protectPathS = tradeControlTransferPath == CT_PATH_RESPONSE_FAILURE ? "RF" : tradeControlTransferPath == CT_PATH_NO_RESPONSE_RETENTION ? "NR" : "NA"
+            string protectConfirmS = adverseStructuralAcceptance ? "STRUCT" : transferProgress ? "PROGRESS" : "NA"
+            string protectCommentS = "PROTECT|CH=" + f_ctEventTag(tradeControlChallengeCode) + "|PATH=" + protectPathS + "|CF=" + protectConfirmS + "|EV=" + f_ctEventTag(tradeControlProtectEvent) + "|OA=" + (adverseOriginAcceptance ? "1" : "0") + "|RS=" + (tradeControlResponseSeen ? "1" : "0") + "|B=" + str.tostring(na(tradeControlChallengeBar) ? 0 : bar_index - tradeControlChallengeBar)
+            if activeIsReentry
+                strategy.close("S2", comment="SELL AGAIN PROTECT", alert_message=f_autoExit("REENTRY_PROTECT", "REENTRY"), immediately=true)
+                actionText := "SELL AGAIN"
+            else
+                strategy.close("S", comment=protectCommentS, alert_message=f_autoExit(protectCommentS, "PRIMARY"), immediately=true)
+                actionText := "SELL"
+            internalNote := "CONTROL TRANSFER · " + f_ctEventText(tradeControlProtectEvent) + " · CHALLENGE " + f_ctEventText(tradeControlChallengeCode)
+        else if enableEarlyExit and longFailure
+            if activeIsReentry
+                strategy.close("L2", comment="SELL AGAIN EARLY", alert_message=f_autoExit("REENTRY_EARLY", "REENTRY"), immediately=true)
+                actionText := "SELL AGAIN"
+            else
+                strategy.close("L", comment="EARLY", alert_message=f_autoExit("EARLY", "PRIMARY"), immediately=true)
+                actionText := "SELL"
+            internalNote := "LONG THESIS FAILED"
+        else if enableEarlyExit and shortFailure
+            if activeIsReentry
+                strategy.close("S2", comment="SELL AGAIN EARLY", alert_message=f_autoExit("REENTRY_EARLY", "REENTRY"), immediately=true)
+                actionText := "SELL AGAIN"
+            else
+                strategy.close("S", comment="EARLY", alert_message=f_autoExit("EARLY", "PRIMARY"), immediately=true)
+                actionText := "SELL"
+            internalNote := "SHORT THESIS FAILED"
+        else
+            bool longMoveExhausted = enableMoveExhaustionSell and strategy.position_size > 0 and
+                 heldBars >= minEarlyBars and
+                 (auctionCode == AUC_BALANCE or auctionCode == AUC_CHOP) and
+                 not upTerritory and not upHolding and buyerResult < moveMinResult and
+                 (sellerSponsored or buyerCounterWeak or dnHolding or dnTerritory)
+            bool shortMoveExhausted = enableMoveExhaustionSell and strategy.position_size < 0 and
+                 heldBars >= minEarlyBars and
+                 (auctionCode == AUC_BALANCE or auctionCode == AUC_CHOP) and
+                 not dnTerritory and not dnHolding and sellerResult < moveMinResult and
+                 (buyerSponsored or sellerCounterWeak or upHolding or upTerritory)
+            if longMoveExhausted
+                if activeIsReentry
+                    strategy.close("L2", comment="SELL AGAIN EXHAUST", alert_message=f_autoExit("REENTRY_EXHAUST", "REENTRY"), immediately=true)
+                    actionText := "SELL AGAIN"
+                else
+                    strategy.close("L", comment=closeMovePts > 0 ? "LIFE_BANK_EXHAUST" : "SELL_EXHAUST", alert_message=f_autoExit(closeMovePts > 0 ? "LIFE_BANK_EXHAUST" : "SELL_EXHAUST", "PRIMARY"), immediately=true)
+                    actionText := "SELL"
+                internalNote := "MOVE LOST CHARACTER · BUYERS NO LONGER PRODUCING PROGRESS"
+            else if shortMoveExhausted
+                if activeIsReentry
+                    strategy.close("S2", comment="SELL AGAIN EXHAUST", alert_message=f_autoExit("REENTRY_EXHAUST", "REENTRY"), immediately=true)
+                    actionText := "SELL AGAIN"
+                else
+                    strategy.close("S", comment=closeMovePts > 0 ? "LIFE_BANK_EXHAUST" : "SELL_EXHAUST", alert_message=f_autoExit(closeMovePts > 0 ? "LIFE_BANK_EXHAUST" : "SELL_EXHAUST", "PRIMARY"), immediately=true)
+                    actionText := "SELL"
+                internalNote := "MOVE LOST CHARACTER · SELLERS NO LONGER PRODUCING PROGRESS"
+            else
+                actionText := activeIsReentry ?
+                     (strategy.position_size > 0 ? "CALL AGAIN ACTIVE" : "PUT AGAIN ACTIVE") :
+                     strategy.position_size > 0 ? "CALL " + f_lifeText(tradeLifeState) : "PUT " + f_lifeText(tradeLifeState)
+                if not activeIsReentry
+                    internalNote := "MOVE LIFE " + f_lifeText(tradeLifeState) +
+                         " · FP " + f_fpText() + " · AMD " + f_amdText(amdState)
+    else if reentryPendingSide != SIDE_NONE
+        bool reStale = bar_index - reentryArmBar >= armTriggerFreshBars
+        bool reInvalidated = reentryPendingSide == SIDE_LONG ? low <= reentryInvalid : high >= reentryInvalid
+        bool reContradicted = reentryPendingSide == SIDE_LONG ? bullContradicted : bearContradicted
+        bool reOppositeTookOver = reentryPendingSide == SIDE_LONG ? bearSupported : bullSupported
+        bool reRouteCollapsed = reentryPendingSide == SIDE_LONG ?
+             (not longReentryRouteReady or not longContinuationQuality) :
+             (not shortReentryRouteReady or not shortContinuationQuality)
+        bool reSessionClosed = not entriesAllowedNow
+        if reStale or reInvalidated or reContradicted or reOppositeTookOver or reRouteCollapsed or reSessionClosed
+            if reentryPendingSide == SIDE_LONG
+                strategy.cancel("L2")
+                strategy.cancel("L2-X")
+            else
+                strategy.cancel("S2")
+                strategy.cancel("S2-X")
+            internalNote := reInvalidated ? "ENTER AGAIN INVALIDATED BEFORE FILL" :
+                 reContradicted ? "ENTER AGAIN THESIS CONTRADICTED" :
+                 reOppositeTookOver ? "ENTER AGAIN OPPOSING SIDE TOOK OVER" :
+                 reRouteCollapsed ? "ENTER AGAIN NO LONGER HAS CLEAN +$1 ROUTE" :
+                 reSessionClosed ? "ENTER AGAIN WINDOW CLOSED" :
+                 "ENTER AGAIN TRIGGER EXPIRED"
+            reentryPendingSide := SIDE_NONE
+            reentryTrigger := na
+            reentryInvalid := na
+            reentryTarget := na
+            reentryArmBar := na
+            reentryReason := ""
+            continuationWatch := false
+            continuationResetSeen := false
+            continuationResetBar := na
+            continuationResetExtreme := na
+            actionText := "WAIT"
+        else
+            actionText := reentryPendingSide == SIDE_LONG ? "ARM AGAIN CALL" : "ARM AGAIN PUT"
+            internalNote := "ONE-TIME CONTINUATION · WAITING FOR FRESH PRICE CONFIRMATION"
+    else if pendingSide != SIDE_NONE
+        bool triggerStale = bar_index - armBar >= armTriggerFreshBars
+        bool invalidated = pendingSide == SIDE_LONG ? low <= armInvalid : high >= armInvalid
+        bool contradicted = pendingSide == SIDE_LONG ?
+             (storyState == STORY_FAILED or longHardFailureNow) :
+             (storyState == STORY_FAILED or shortHardFailureNow)
+        bool oppositeTookOver = pendingSide == SIDE_LONG ?
+             (storySide == SIDE_SHORT and shortControlNow) :
+             (storySide == SIDE_LONG and longControlNow)
+        bool routeCollapsed = storyStageCode == STORY_STAGE_EXHAUSTED or
+             (not na(storyCapacityPts) and storyCapacityPts < storyMinCapacityPts * 0.50)
+        bool fuelContradicted = pendingSide == SIDE_LONG ?
+             (fpHas and fpLongEffortRejected and (dnTerritory or dnHolding)) :
+             (fpHas and fpShortEffortRejected and (upTerritory or upHolding))
+        bool sessionNoLongerAllowsEntry = not entriesAllowedNow
+        if invalidated or contradicted or oppositeTookOver or routeCollapsed or fuelContradicted or sessionNoLongerAllowsEntry
+            if pendingSide == SIDE_LONG
+                strategy.cancel("L")
+                strategy.cancel("L-X")
+            else
+                strategy.cancel("S")
+                strategy.cancel("S-X")
+            internalNote := invalidated ? "THESIS INVALIDATED BEFORE ENTRY" :
+                 contradicted ? "THESIS CONTRADICTED" :
+                 oppositeTookOver ? "OPPOSING THESIS TOOK OVER" :
+                 routeCollapsed ? "ROUTE COLLAPSED" :
+                 fuelContradicted ? "FOOTPRINT / AMD FUEL CONTRADICTED" :
+                 propShieldActive ? "PROP SHIELD ACTIVE · PENDING ARM CANCELED" :
+                 "PROP EXECUTION WINDOW CLOSED"
+            pendingSide := SIDE_NONE
+            armTrigger := na
+            armInvalid := na
+            armExecInvalid := na
+            armTarget := na
+            armBar := na
+            armReason := ""
+            armMeta := ""
+            armRefreshCount := 0
+            episodeUsed := true
+            storyUsedForMain := true
+            actionText := "WAIT"
+        else if triggerStale
+            if pendingSide == SIDE_LONG
+                strategy.cancel("L")
+                strategy.cancel("L-X")
+            else
+                strategy.cancel("S")
+                strategy.cancel("S-X")
+            int releasedSide = pendingSide
+            pendingSide := SIDE_NONE
+            armTrigger := na
+            armInvalid := na
+            armExecInvalid := na
+            armTarget := na
+            armBar := na
+            armReason := ""
+            armMeta := ""
+            armRefreshCount := 0
+            episodeUsed := true
+            storyUsedForMain := true
+            actionText := releasedSide == SIDE_LONG ?
+                 "CALL THESIS · ATTEMPT EXPIRED" :
+                 "PUT THESIS · ATTEMPT EXPIRED"
+            internalNote := "STALE ARM EXPIRED · WAIT FOR FRESH EPISODE"
+        else
+            if pendingSide == SIDE_LONG
+                strategy.entry("L", strategy.long, stop=armTrigger, comment=armMeta, alert_message=f_autoEntry("LONG", "PRIMARY", armTrigger, armTarget, armInvalid))
+                strategy.exit("L-X", from_entry="L", stop=armInvalid,
+                     comment_loss="STOP", alert_loss=f_autoExit("STOP", "PRIMARY"))
+                actionText := "ARM CALL"
+            else
+                strategy.entry("S", strategy.short, stop=armTrigger, comment=armMeta, alert_message=f_autoEntry("SHORT", "PRIMARY", armTrigger, armTarget, armInvalid))
+                strategy.exit("S-X", from_entry="S", stop=armInvalid,
+                     comment_loss="STOP", alert_loss=f_autoExit("STOP", "PRIMARY"))
+                actionText := "ARM PUT"
+    else
+        bool bullAlive = bullDeveloping and not bullContradicted
+        bool bearAlive = bearDeveloping and not bearContradicted
+        if episodeSide == SIDE_LONG
+            if bullAlive
+                episodeQuietBars := 0
+            else
+                episodeQuietBars += 1
+        else if episodeSide == SIDE_SHORT
+            if bearAlive
+                episodeQuietBars := 0
+            else
+                episodeQuietBars += 1
+        if episodeSide == SIDE_LONG and bearSupported and not bullSupported
+            episodeSide := SIDE_SHORT
+            episodeStartBar := bar_index
+            episodeQuietBars := 0
+            episodeUsed := false
+            episodeReason := shortReason
+            shortMaturityWait := false
+            shortPullbackSeen := false
+            shortMaturityLow := na
+            shortMaturityBar := na
+            longControlWait := false
+            shortControlWait := false
+            longControlRearm := false
+            shortControlRearm := false
+            continuationWatch := false
+            continuationSide := SIDE_NONE
+            continuationExitBar := na
+            reentryPendingSide := SIDE_NONE
+        else if episodeSide == SIDE_SHORT and bullSupported and not bearSupported
+            episodeSide := SIDE_LONG
+            episodeStartBar := bar_index
+            episodeQuietBars := 0
+            episodeUsed := false
+            episodeReason := longReason
+            shortMaturityWait := false
+            shortPullbackSeen := false
+            shortMaturityLow := na
+            shortMaturityBar := na
+            longControlWait := false
+            shortControlWait := false
+            longControlRearm := false
+            shortControlRearm := false
+            continuationWatch := false
+            continuationSide := SIDE_NONE
+            continuationExitBar := na
+            reentryPendingSide := SIDE_NONE
+        if episodeSide != SIDE_NONE and episodeQuietBars >= episodeResetBars
+            episodeSide := SIDE_NONE
+            episodeStartBar := na
+            episodeQuietBars := 0
+            episodeUsed := false
+            episodeReason := ""
+            shortMaturityWait := false
+            shortPullbackSeen := false
+            shortMaturityLow := na
+            shortMaturityBar := na
+            longControlWait := false
+            shortControlWait := false
+            longControlRearm := false
+            shortControlRearm := false
+            continuationWatch := false
+            continuationSide := SIDE_NONE
+            continuationExitBar := na
+            reentryPendingSide := SIDE_NONE
+        if episodeSide == SIDE_NONE
+            if bullAlive and not bearAlive
+                episodeSide := SIDE_LONG
+                episodeStartBar := bar_index
+                episodeReason := longReason
+                shortMaturityWait := false
+                shortPullbackSeen := false
+                shortMaturityLow := na
+                shortMaturityBar := na
+                longControlWait := false
+                shortControlWait := false
+                longControlRearm := false
+                shortControlRearm := false
+            else if bearAlive and not bullAlive
+                episodeSide := SIDE_SHORT
+                episodeStartBar := bar_index
+                episodeReason := shortReason
+                shortMaturityWait := false
+                shortPullbackSeen := false
+                shortMaturityLow := na
+                shortMaturityBar := na
+                longControlWait := false
+                shortControlWait := false
+                longControlRearm := false
+                shortControlRearm := false
+        if episodeSide == SIDE_LONG and not episodeUsed
+            if longReversalUnprovenNow and not longControlWait
+                longControlWait := true
+                longControlRearm := false
+            bool longControlTransferred =
+                 longControlWait and
+                 not dnTerritory and not dnHolding and
+                 (upTerritory or upHolding or
+                  (not upTerritory and not dnTerritory and not upHolding and not dnHolding) or
+                  auctionCode == AUC_EXP_UP or
+                  acceptedAboveR)
+            if longControlTransferred
+                longControlWait := false
+                longControlRearm := true
+        if episodeSide == SIDE_SHORT and not episodeUsed
+            if shortReversalUnprovenNow and not shortControlWait
+                shortControlWait := true
+                shortControlRearm := false
+            bool shortControlTransferred =
+                 shortControlWait and
+                 not upTerritory and not upHolding and
+                 (dnTerritory or dnHolding or
+                  (not upTerritory and not dnTerritory and not upHolding and not dnHolding) or
+                  auctionCode == AUC_EXP_DN or
+                  acceptedBelowS)
+            if shortControlTransferred
+                shortControlWait := false
+                shortControlRearm := true
+        if episodeSide == SIDE_SHORT and not episodeUsed
+            if shortMoveMatureNow and not shortMaturityWait
+                shortMaturityWait := true
+                shortPullbackSeen := false
+                shortMaturityLow := low
+                shortMaturityBar := bar_index
+            if shortMaturityWait
+                shortMaturityLow := na(shortMaturityLow) ? low : math.min(shortMaturityLow, low)
+                bool meaningfulShortPullback =
+                     bar_index > shortMaturityBar and
+                     close >= shortMaturityLow + atr * territoryMinAtr and
+                     (buyerResult >= 0.14 or close > open)
+                if meaningfulShortPullback
+                    shortPullbackSeen := true
+        bool shortFreshResponse =
+             shortMaturityWait and shortPullbackSeen and
+             (rejectedAtR or balanceReclaimDn or
+              (close < open and sellerResult >= 0.14 and not sellerPoorResult))
+        bool longControlReady = not longControlWait
+        bool longBaseArmReady =
+             entriesAllowedNow and busValid and
+             episodeSide == SIDE_LONG and not episodeUsed and
+             bullSupported and not bearSupported and
+             not bullContradicted and
+             not buyerCounterWeak and
+             longControlReady and
+             longSessionRunwayReady and
+             longRouteUsable and
+             longOptionsBase
+        bool shortWorthTaking =
+             not shortMaturityWait or shortFreshResponse
+        bool shortControlReady = not shortControlWait
+        bool downShockStabilizing =
+             ctxValid and shockStateCtx == 3 and shockDirCtx < 0
+        bool r1AcceptedAboveConflict =
+             ctxValid and r1ReactionCtx == 7
+        bool failedUpCausalConflict =
+             enableCausalReset and shortFailedUp and
+             (downShockStabilizing or r1AcceptedAboveConflict)
+        bool freshShortDiscoveryEvent =
+             shortDiscovery and not shortDiscovery[1]
+        bool freshShortAcceptanceEvent =
+             shortAcceptance and not shortAcceptance[1]
+        bool freshShortDefenseEvent =
+             shortResistanceDefense and not shortResistanceDefense[1] and
+             not r1AcceptedAboveConflict
+        bool freshSellerResetEvent =
+             freshShortAcceptanceEvent or
+             freshShortDiscoveryEvent or
+             freshShortDefenseEvent
+        bool shortCausalReady =
+             not failedUpCausalConflict or freshSellerResetEvent
+        string shortCausalReason =
+             freshShortAcceptanceEvent ? "BREAKDOWN + ACCEPTANCE" :
+             freshShortDiscoveryEvent ? "DOWNWARD DISCOVERY" :
+             freshShortDefenseEvent ? "RESISTANCE DEFENSE" :
+             shortReason
+        string auditSnapshotNow = ""
+        bool shortBaseArmReady =
+             entriesAllowedNow and busValid and
+             episodeSide == SIDE_SHORT and not episodeUsed and
+             bearSupported and not bullSupported and
+             not bearContradicted and
+             not sellerCounterWeak and
+             shortWorthTaking and
+             shortControlReady and
+             shortCausalReady and
+             shortParticipationReady and
+             shortRouteUsable and
+             shortOptionsBase
+        bool longStoryGeometryReady = not na(longStop) and longStop < high + tick
+        bool shortStoryGeometryReady = not na(shortStop) and shortStop > low - tick
+
+        bool longGlobalRenewalNow =
+             longExpansionCanBreak and storySide == SIDE_LONG and storyCurrentControl
+        bool shortGlobalRenewalNow =
+             shortExpansionCanBreak and storySide == SIDE_SHORT and storyCurrentControl
+
+        int longMemoryRefreshReason = f_directionalRefreshReason(
+             enableDirectionalEpisodeMemory, SIDE_LONG, dirMemoryConsumed, dirMemorySide,
+             dirMemoryBalanceSeen, storyCause, storyParticipationState,
+             storyChallengeQuality, storyChallengeReclaimFrac, storyAnchor, dirMemoryAnchor,
+             storyCurrentControl, storyActionState, longGlobalRenewalNow, atr)
+        int shortMemoryRefreshReason = f_directionalRefreshReason(
+             enableDirectionalEpisodeMemory, SIDE_SHORT, dirMemoryConsumed, dirMemorySide,
+             dirMemoryBalanceSeen, storyCause, storyParticipationState,
+             storyChallengeQuality, storyChallengeReclaimFrac, storyAnchor, dirMemoryAnchor,
+             storyCurrentControl, storyActionState, shortGlobalRenewalNow, atr)
+
+        bool longDirectionalMemoryReady = not enableDirectionalEpisodeMemory or
+             not dirMemoryConsumed or dirMemorySide != SIDE_LONG or longMemoryRefreshReason > 0
+        bool shortDirectionalMemoryReady = not enableDirectionalEpisodeMemory or
+             not dirMemoryConsumed or dirMemorySide != SIDE_SHORT or shortMemoryRefreshReason > 0
+
+        bool longDirectEvidenceKnown = storyParticipationState != PART_DIRECT or
+             not enableUnknownFlowAwareness or not longFlowUnknown
+        bool shortDirectEvidenceKnown = storyParticipationState != PART_DIRECT or
+             not enableUnknownFlowAwareness or not shortFlowUnknown
+
+        bool longArmReady = entriesAllowedNow and busValid and longStoryBrainReady and
+             longStoryParticipationReady and longStoryGeometryReady and longSessionRunwayReady and
+             longDirectionalMemoryReady and longDirectEvidenceKnown
+        bool shortArmReady = entriesAllowedNow and busValid and shortStoryBrainReady and
+             shortStoryParticipationReady and shortStoryGeometryReady and
+             shortDirectionalMemoryReady and shortDirectEvidenceKnown
+        flowWatchSide := SIDE_NONE
+        flowWatchBar := na
+        if storySide == SIDE_LONG and not longArmReady
+            actionText := not longDirectionalMemoryReady and storyParticipationState == PART_REACCEL ?
+                 "CALL STORY · LOCAL RECLAIM · WAIT GLOBAL RENEWAL" :
+                 not longDirectionalMemoryReady and storyParticipationReady ?
+                 "CALL STORY · OLD DIRECTIONAL INFO · WAIT REAL RESET" :                 not longDirectEvidenceKnown and storyParticipationReady ?
+                 "CALL STORY · FLOW UNKNOWN · WAIT OBSERVABLE PROOF" :
+                 storyParticipationCause == STORY_CAUSE_DEFENSE and enableResponsiveInitiativeReasoning and
+                 not storyInitiativeNow and storyActionState ?
+                 "CALL STORY · DEFENSE HELD · WAIT BUYER INITIATIVE" :
+                 "CALL STORY · " + f_storyText(storyState) + " · " + storyParticipationWhy
+        else if storySide == SIDE_SHORT and not shortArmReady
+            actionText := not shortDirectionalMemoryReady and storyParticipationState == PART_REACCEL ?
+                 "PUT STORY · LOCAL RECLAIM · WAIT GLOBAL RENEWAL" :
+                 not shortDirectionalMemoryReady and storyParticipationReady ?
+                 "PUT STORY · OLD DIRECTIONAL INFO · WAIT REAL RESET" :                 not shortDirectEvidenceKnown and storyParticipationReady ?
+                 "PUT STORY · FLOW UNKNOWN · WAIT OBSERVABLE PROOF" :
+                 storyParticipationCause == STORY_CAUSE_DEFENSE and enableResponsiveInitiativeReasoning and
+                 not storyInitiativeNow and storyActionState ?
+                 "PUT STORY · DEFENSE HELD · WAIT SELLER INITIATIVE" :
+                 "PUT STORY · " + f_storyText(storyState) + " · " + storyParticipationWhy
+        if continuationWatch and not continuationAttempted and not na(continuationExitBar)
+            bool continuationExpired = bar_index - continuationExitBar > reentryWatchBars
+            bool continuationInvalid = continuationSide == SIDE_LONG ? bullContradicted : bearContradicted
+            bool continuationOpposite = continuationSide == SIDE_LONG ?
+                 (bearSupported and not bullSupported) : (bullSupported and not bearSupported)
+            if continuationExpired or continuationInvalid or continuationOpposite
+                continuationWatch := false
+                continuationResetSeen := false
+                continuationResetBar := na
+                continuationResetExtreme := na
+            else if bar_index > continuationExitBar and not continuationResetSeen
+                bool longResetNow = continuationSide == SIDE_LONG and not bullContradicted and
+                     (close < close[1] or low < low[1] or auctionCode == AUC_TEST_DN or
+                      auctionCode == AUC_BALANCE or dnHolding or fpAggSell) and
+                     not (acceptedBelowS and dnTerritory)
+                bool shortResetNow = continuationSide == SIDE_SHORT and not bearContradicted and
+                     (close > close[1] or high > high[1] or auctionCode == AUC_TEST_UP or
+                      auctionCode == AUC_BALANCE or upHolding or fpAggBuy) and
+                     not (acceptedAboveR and upTerritory)
+                if longResetNow or shortResetNow
+                    continuationResetSeen := true
+                    continuationResetBar := bar_index
+                    continuationResetExtreme := longResetNow ? low : high
+        bool longReaccelerating = continuationWatch and continuationResetSeen and
+             continuationSide == SIDE_LONG and not na(continuationResetBar) and bar_index > continuationResetBar and
+             close > close[1] and high > high[1] and
+             (upTerritory or buyerSponsored or auctionCode == AUC_EXP_UP or longAcceptance) and
+             (not fpHas or fpLongSupport or fpLongConstructive or fpSellerAbsorbed or amdState == AMD_DIST_UP) and
+             not fpLongContradiction
+        bool shortReaccelerating = continuationWatch and continuationResetSeen and
+             continuationSide == SIDE_SHORT and not na(continuationResetBar) and bar_index > continuationResetBar and
+             close < close[1] and low < low[1] and
+             (dnTerritory or sellerSponsored or auctionCode == AUC_EXP_DN or shortAcceptance) and
+             (not fpHas or fpShortSupport or fpShortConstructive or fpBuyerAbsorbed or amdState == AMD_DIST_DN) and
+             not fpShortContradiction
+        float longReStopNow = math.max(longStop, low - stopBuf)
+        float shortReStopNow = math.min(shortStop, high + stopBuf)
+        float longReRiskNow = math.max(longReentryTriggerNow - longReStopNow, tick)
+        float shortReRiskNow = math.max(shortReStopNow - shortReentryTriggerNow, tick)
+        bool longReentryReady =
+             continuationWatch and not continuationAttempted and continuationResetSeen and longReaccelerating and
+             continuationSide == SIDE_LONG and
+             not na(continuationExitBar) and bar_index > continuationExitBar and
+             bar_index - continuationExitBar <= reentryWatchBars and
+             entriesAllowedNow and busValid and
+             episodeSide == SIDE_LONG and episodeUsed and
+             bullSupported and not bearSupported and
+             longContinuationQuality and longReentryRouteReady and
+             longReStopNow < longReentryTriggerNow - tick and
+             longReRiskNow <= reentryMaxRiskPts and
+             longSessionRunwayReady
+        bool shortReentryReady =
+             continuationWatch and not continuationAttempted and continuationResetSeen and shortReaccelerating and
+             continuationSide == SIDE_SHORT and
+             not na(continuationExitBar) and bar_index > continuationExitBar and
+             bar_index - continuationExitBar <= reentryWatchBars and
+             entriesAllowedNow and busValid and
+             episodeSide == SIDE_SHORT and episodeUsed and
+             bearSupported and not bullSupported and
+             shortContinuationQuality and shortReentryRouteReady and
+             shortReStopNow > shortReentryTriggerNow + tick and
+             shortReRiskNow <= reentryMaxRiskPts and
+             shortCausalReady
+        if longReentryReady
+            reentryPendingSide := SIDE_LONG
+            reentryTrigger := longReentryTriggerNow
+            reentryInvalid := longReStopNow
+            reentryTarget := reentryTrigger + reentryTargetPts
+            reentryArmBar := bar_index
+            reentryReason := "CONTINUATION AGAIN"
+            continuationAttempted := true
+            string reMetaL =
+                 "V=OPT2B191|RE=1|SD=L|F=CONT_AGAIN|PT=" + str.tostring(hour(time, TRADE_TZ), "00") + str.tostring(minute(time, TRADE_TZ), "00") +
+                 "|TRG=" + str.tostring(reentryTrigger, format.mintick) +
+                 "|SL=" + str.tostring(reentryInvalid, format.mintick) +
+                 "|TP=" + str.tostring(reentryTarget, format.mintick) +
+                 "|ROOM=" + (na(longReentryRoomNow) ? "NA" : str.tostring(longReentryRoomNow, "#.##")) +
+                 "|EFF=" + str.tostring(territoryEfficiency, "#.###") +
+                 "|RV=" + str.tostring(moveParticipation, "#.###") +
+                 "|RP=" + str.tostring(moveRangePace, "#.###") +
+                 "|FPD=" + f_num(fpDeltaPct, "#.###") +
+                 "|AMD=" + str.tostring(amdState)
+            strategy.entry("L2", strategy.long, stop=reentryTrigger, comment=reMetaL, alert_message=f_autoEntry("LONG", "REENTRY", reentryTrigger, reentryTarget, reentryInvalid))
+            strategy.exit("L2-X", from_entry="L2", stop=reentryInvalid, limit=reentryTarget,
+                 comment_profit="SELL AGAIN", comment_loss="STOP AGAIN",
+                 alert_profit=f_autoExit("REENTRY_TARGET", "REENTRY"), alert_loss=f_autoExit("REENTRY_STOP", "REENTRY"))
+            actionText := "ARM AGAIN CALL"
+            internalNote := "MAIN PROFIT BANKED · ONE-TIME +$1 CONTINUATION READY"
+            if showSignals
+                label.new(bar_index, low, "ARM AGAIN CALL",
+                     style=label.style_label_up, textcolor=color.black,
+                     color=color.new(color.lime, 20), size=size.tiny)
+            alert(f_autoArm("LONG", "REENTRY", reentryTrigger), alert.freq_once_per_bar_close)
+        else if shortReentryReady
+            reentryPendingSide := SIDE_SHORT
+            reentryTrigger := shortReentryTriggerNow
+            reentryInvalid := shortReStopNow
+            reentryTarget := reentryTrigger - reentryTargetPts
+            reentryArmBar := bar_index
+            reentryReason := "CONTINUATION AGAIN"
+            continuationAttempted := true
+            string reMetaS =
+                 "V=OPT2B191|RE=1|SD=S|F=CONT_AGAIN|PT=" + str.tostring(hour(time, TRADE_TZ), "00") + str.tostring(minute(time, TRADE_TZ), "00") +
+                 "|TRG=" + str.tostring(reentryTrigger, format.mintick) +
+                 "|SL=" + str.tostring(reentryInvalid, format.mintick) +
+                 "|TP=" + str.tostring(reentryTarget, format.mintick) +
+                 "|ROOM=" + (na(shortReentryRoomNow) ? "NA" : str.tostring(shortReentryRoomNow, "#.##")) +
+                 "|EFF=" + str.tostring(territoryEfficiency, "#.###") +
+                 "|RV=" + str.tostring(moveParticipation, "#.###") +
+                 "|RP=" + str.tostring(moveRangePace, "#.###") +
+                 "|FPD=" + f_num(fpDeltaPct, "#.###") +
+                 "|AMD=" + str.tostring(amdState)
+            strategy.entry("S2", strategy.short, stop=reentryTrigger, comment=reMetaS, alert_message=f_autoEntry("SHORT", "REENTRY", reentryTrigger, reentryTarget, reentryInvalid))
+            strategy.exit("S2-X", from_entry="S2", stop=reentryInvalid, limit=reentryTarget,
+                 comment_profit="SELL AGAIN", comment_loss="STOP AGAIN",
+                 alert_profit=f_autoExit("REENTRY_TARGET", "REENTRY"), alert_loss=f_autoExit("REENTRY_STOP", "REENTRY"))
+            actionText := "ARM AGAIN PUT"
+            internalNote := "MAIN PROFIT BANKED · ONE-TIME +$1 CONTINUATION READY"
+            if showSignals
+                label.new(bar_index, high, "ARM AGAIN PUT",
+                     style=label.style_label_down, textcolor=color.white,
+                     color=color.new(color.red, 20), size=size.tiny)
+            alert(f_autoArm("SHORT", "REENTRY", reentryTrigger), alert.freq_once_per_bar_close)
+        else if longArmReady
+            pendingSide := SIDE_LONG
+            armTrigger := high + tick
+            armInvalid := longStop
+            armExecInvalid := storyParticipationState == PART_REACCEL and storyQuestionGeometry ?
+                 math.max(longStop, storyQuestionInvalid) :
+                 math.max(longStop, math.min(low, low[1]) - stopBuf)
+            float armRisk = math.max(armTrigger - armInvalid, tick)
+            armQuickAtr := atr
+            armQuickObjectivePts := moveMilestonePts
+            armTarget := armTrigger + moveMilestonePts
+            armBar := bar_index
+            armReason := f_storyCauseText(storyCause) + " · " + f_storyText(storyState) + " · " +
+                 f_participationText(storyParticipationState) +
+                 (storyQuestionGeometry ? " · qR " + f_num(storyQuestionTargetPts, "#.##") + "/" +
+                  f_num(storyQuestionRiskPts, "#.##") : "")
+            armStoryCause := storyCause
+            armStoryAnchor := storyAnchor
+            armRefreshCount := 0
+            string longSessionTag =
+                 lateFailedDownLong ? "LATE_FD_PROVED" : "NORMAL"
+            armMeta := f_buildArmMeta("L", armReason, longRoomR, armTrigger, armInvalid, armTarget,
+                 "NA", longControlRearm ? "XFER" : "FRESH", "NA", armRefreshCount, longSessionTag,
+                 propDailyRealizedR, propDailyStops, auditSnapshotNow) +
+                      "|DMR=" + str.tostring(longMemoryRefreshReason) +
+                      "|DMC=" + str.tostring(dirMemorySameSideCount) +
+                      "|DMB=" + (dirMemoryBalanceSeen ? "1" : "0") +
+                      "|DMO=" + (dirMemoryOppControlSeen ? "1" : "0") +
+                      "|R2I=" + (storyInitiativeNow ? "1" : "0") +
+                      "|EKN=" + (longDirectEvidenceKnown ? "1" : "0") +                      "|GXR=" + (longGlobalRenewalNow ? "1" : "0")
+            longControlRearm := false
+            episodeUsed := true
+            storyUsedForMain := true
+            eventArmLong := true
+            actionText := "ARM CALL"
+            strategy.entry("L", strategy.long, stop=armTrigger, comment=armMeta, alert_message=f_autoEntry("LONG", "PRIMARY", armTrigger, armTarget, armInvalid))
+            strategy.exit("L-X", from_entry="L", stop=armInvalid,
+                 comment_loss="STOP", alert_loss=f_autoExit("STOP", "PRIMARY"))
+            alert(f_autoArm("LONG", "PRIMARY", armTrigger), alert.freq_once_per_bar_close)
+        else if shortArmReady
+            pendingSide := SIDE_SHORT
+            armTrigger := low - tick
+            armInvalid := shortStop
+            armExecInvalid := storyParticipationState == PART_REACCEL and storyQuestionGeometry ?
+                 math.min(shortStop, storyQuestionInvalid) :
+                 math.min(shortStop, math.max(high, high[1]) + stopBuf)
+            float armRisk = math.max(armInvalid - armTrigger, tick)
+            armQuickAtr := atr
+            armQuickObjectivePts := moveMilestonePts
+            armTarget := armTrigger - moveMilestonePts
+            armBar := bar_index
+            armReason := f_storyCauseText(storyCause) + " · " + f_storyText(storyState) + " · " +
+                 f_participationText(storyParticipationState) +
+                 (storyQuestionGeometry ? " · qR " + f_num(storyQuestionTargetPts, "#.##") + "/" +
+                  f_num(storyQuestionRiskPts, "#.##") : "")
+            armStoryCause := storyCause
+            armStoryAnchor := storyAnchor
+            armRefreshCount := 0
+            armMeta := f_buildArmMeta("S", armReason, shortRoomR, armTrigger, armInvalid, armTarget,
+                 shortMaturityWait ? "PULLBACK_REARM" : "FRESH",
+                 shortControlRearm ? "XFER" : "FRESH", "READY", armRefreshCount, "NORMAL",
+                 propDailyRealizedR, propDailyStops, auditSnapshotNow) +
+                      "|DMR=" + str.tostring(shortMemoryRefreshReason) +
+                      "|DMC=" + str.tostring(dirMemorySameSideCount) +
+                      "|DMB=" + (dirMemoryBalanceSeen ? "1" : "0") +
+                      "|DMO=" + (dirMemoryOppControlSeen ? "1" : "0") +
+                      "|R2I=" + (storyInitiativeNow ? "1" : "0") +
+                      "|EKN=" + (shortDirectEvidenceKnown ? "1" : "0") +                      "|GXR=" + (shortGlobalRenewalNow ? "1" : "0")
+            shortControlRearm := false
+            shortMaturityWait := false
+            shortPullbackSeen := false
+            shortMaturityLow := na
+            shortMaturityBar := na
+            longControlWait := false
+            shortControlWait := false
+            longControlRearm := false
+            shortControlRearm := false
+            episodeUsed := true
+            storyUsedForMain := true
+            eventArmShort := true
+            actionText := "ARM PUT"
+            strategy.entry("S", strategy.short, stop=armTrigger, comment=armMeta, alert_message=f_autoEntry("SHORT", "PRIMARY", armTrigger, armTarget, armInvalid))
+            strategy.exit("S-X", from_entry="S", stop=armInvalid,
+                 comment_loss="STOP", alert_loss=f_autoExit("STOP", "PRIMARY"))
+            alert(f_autoArm("SHORT", "PRIMARY", armTrigger), alert.freq_once_per_bar_close)
+        else
+            actionText := continuationWatch and continuationSide == SIDE_LONG ? "WATCH CALL AGAIN" :
+                 continuationWatch and continuationSide == SIDE_SHORT ? "WATCH PUT AGAIN" :
+                 episodeSide == SIDE_LONG and longControlWait ? "REVERSAL UNPROVEN — WAIT CONTROL" :
+                 episodeSide == SIDE_SHORT and shortControlWait ? "REVERSAL UNPROVEN — WAIT CONTROL" :
+                 episodeSide == SIDE_LONG and lateFailedDownLong and not longSessionRunwayReady ? "CALL REVERSAL — WAIT RUNWAY PROOF" :
+                 episodeSide == SIDE_LONG and not longOptionsSuitable ? "CALL THESIS · WAIT MOVE PROOF" :
+                 episodeSide == SIDE_LONG ? "CALL DEVELOPING" :
+                 episodeSide == SIDE_SHORT and shortMaturityWait and not shortPullbackSeen ? "SHORT MATURE — WAIT PULLBACK" :
+                 episodeSide == SIDE_SHORT and shortMaturityWait and shortPullbackSeen ? "WAIT FRESH SELLER RESPONSE" :
+                 episodeSide == SIDE_SHORT and failedUpCausalConflict and not freshSellerResetEvent ? "SHORT THESIS CONFLICT — WAIT NEW SELLER EVENT" :
+                 episodeSide == SIDE_SHORT and not shortParticipationReady ? "SHORT DEVELOPING — WAIT PARTICIPATION" :
+                 episodeSide == SIDE_SHORT ? "SHORT DEVELOPING" :
+                 not propExecutionWindow ? "WAIT — OUTSIDE PROP WINDOW" :
+                 auctionCode == AUC_CHOP ? "WAIT — ROTATION" :
+                 auctionCode == AUC_BALANCE ? "WATCH BALANCE EDGES" : "WAIT"
+            if continuationWatch
+                internalNote := "MAIN PROFIT BANKED · WAITING FOR ONE STRONG +$1 CONTINUATION"
+if propShieldActive and strategy.position_size == 0
+    actionText := "PROP SHIELD — SHADOW ONLY"
+    internalNote := "STRUCTURAL STOP + DAY R <= 0 · EXECUTION LOCKED UNTIL NEXT PT DAY"
+if strategy.closedtrades > lastClosedSeen
+    int idx = strategy.closedtrades - 1
+    string exitComment = strategy.closedtrades.exit_comment(idx)
+    string exitEntryId = strategy.closedtrades.entry_id(idx)
+    float exitPrice = strategy.closedtrades.exit_price(idx)
+    float exitEntryPrice = strategy.closedtrades.entry_price(idx)
+    bool exitedReentry = exitEntryId == "L2" or exitEntryId == "S2"
+    bool exitedMain = exitEntryId == "L" or exitEntryId == "S"
+    bool exitWasLong = str.startswith(exitEntryId, "L")
+    int exitedSide = exitWasLong ? SIDE_LONG : SIDE_SHORT
+    bool exitIsProtect = str.startswith(exitComment, "PROTECT")
+    bool exitIsLock = str.startswith(exitComment, "LOCK")
+    bool exitIsLifeBank = str.startswith(exitComment, "LIFE_BANK") or exitComment == "LOCK_FLOOR" or exitComment == "LIFE_FLOOR_BREACH"
+    bool exitIsProfitBank = exitIsLock or exitIsLifeBank
+    float realizedMovePts = exitWasLong ? exitPrice - exitEntryPrice : exitEntryPrice - exitPrice
+    lastExitText := exitedReentry ? "SELL AGAIN" : "SELL"
+    if exitIsProtect
+        lastProtectCode := tradeProtectCode
+        lastControlProtectEvent := tradeControlProtectEvent
+    lastExitPrice := exitPrice
+    eventExitTarget := false
+    eventExitAgain := exitedReentry
+    eventStop := not exitedReentry and (exitComment == "STOP" or exitComment == "FLOW_STOP")
+    eventExitEarly := not exitedReentry and (str.startswith(exitComment, "EARLY") or exitIsProfitBank or
+         exitComment == "LIFE_FAIL_LAUNCH")
+    eventExitProtect := not exitedReentry and exitIsProtect
+    eventExitTime := not exitedReentry and (exitComment == "TIME" or exitComment == "SELL_EXHAUST")
+    bool continuationContextValid =
+         not noTradeWindow and not sessionTransitionWindow and not sessionTransitionBoundary and
+         episodeSide == exitedSide
+    if exitedMain and exitIsProfitBank and realizedMovePts > 0 and continuationContextValid
+        continuationWatch := true
+        continuationSide := exitedSide
+        continuationExitBar := bar_index
+        continuationAttempted := false
+        continuationResetSeen := false
+        continuationResetBar := na
+        continuationResetExtreme := na
+    else if exitedMain
+        continuationWatch := false
+        continuationSide := SIDE_NONE
+        continuationExitBar := na
+        continuationAttempted := false
+        continuationResetSeen := false
+        continuationResetBar := na
+        continuationResetExtreme := na
+    if exitedReentry
+        continuationWatch := false
+        continuationSide := SIDE_NONE
+        continuationExitBar := na
+        continuationAttempted := true
+        continuationResetSeen := false
+        continuationResetBar := na
+        continuationResetExtreme := na
+        reentryPendingSide := SIDE_NONE
+        reentryTrigger := na
+        reentryInvalid := na
+        reentryTarget := na
+        reentryArmBar := na
+        reentryReason := ""
+    if exitedMain
+        pendingSide := SIDE_NONE
+        armTrigger := na
+        armInvalid := na
+        armExecInvalid := na
+        armTarget := na
+        armBar := na
+        armReason := ""
+        armMeta := ""
+    episodeUsed := true
+    tradeEntry := na
+    tradeStop := na
+    tradeExecInvalid := na
+    tradeTarget := na
+    tradeEntryBar := na
+    tradeReason := ""
+    tradeMeta := ""
+    tradeQuickAtr := na
+    tradeQuickObjectivePts := na
+    tradeInitialRisk := na
+    tradeMfeR := na
+    tradeMaeR := na
+    tradeProved05 := false
+    tradeProved075 := false
+    tradeProved100 := false
+    tradeProof05Bar := na
+    tradeCloseR := na
+    tradeGivebackR := na
+    tradeProtectEvidence := 0
+    tradeProtectCode := 0
+    tradeControlState := CT_UNPROVEN
+    tradeControlEventId := 0
+    tradeControlLastEvent := CT_EVT_NONE
+    tradeControlChallengeCode := CT_EVT_NONE
+    tradeControlChallengeBar := na
+    tradeControlTransferBar := na
+    tradeControlChallengeOrigin := na
+    tradeControlChallengeExtreme := na
+    tradeControlResponseSeen := false
+    tradeControlChallengeCount := 0
+    tradeControlRecoveryCount := 0
+    tradeControlProtectEvent := CT_EVT_NONE
+    tradeControlTransferPath := CT_PATH_NONE
+    tradeControlTransferExtreme := na
+    tradeMovePaid := false
+    tradeMovePaidBar := na
+    tradePeakMovePts := 0.0
+    tradePrevPeakMovePts := 0.0
+    tradeLifeState := LIFE_NONE
+    tradeLifeStateBar := na
+    tradeLifeExhaustBars := 0
+    tradeProfitFloor := na
+    activeIsReentry := false
+    actionText := lastExitText
+    lastClosedSeen := strategy.closedtrades
+plotshape(showSignals and eventArmLong, title="ARM CALL", style=shape.labelup,
+     location=location.belowbar, size=size.tiny, color=color.new(color.lime, 10),
+     text="ARM CALL", textcolor=color.black)
+plotshape(showSignals and eventArmShort, title="ARM PUT", style=shape.labeldown,
+     location=location.abovebar, size=size.tiny, color=color.new(color.red, 10),
+     text="ARM PUT", textcolor=color.white)
+plotshape(showSignals and eventEnterLong, title="ENTER CALL", style=shape.labelup,
+     location=location.belowbar, size=size.small, color=color.lime,
+     text="ENTER CALL", textcolor=color.black)
+plotshape(showSignals and eventEnterShort, title="ENTER PUT", style=shape.labeldown,
+     location=location.abovebar, size=size.small, color=color.red,
+     text="ENTER PUT", textcolor=color.white)
+if showSignals and eventReenterLong
+    label.new(bar_index, low, "ENTER AGAIN CALL",
+         style=label.style_label_up, textcolor=color.black,
+         color=color.new(color.lime, 0), size=size.small)
+if showSignals and eventReenterShort
+    label.new(bar_index, high, "ENTER AGAIN PUT",
+         style=label.style_label_down, textcolor=color.white,
+         color=color.new(color.red, 0), size=size.small)
+if showSignals and eventExitAgain
+    label.new(bar_index, close, "SELL AGAIN",
+         style=label.style_label_down, textcolor=color.black,
+         color=color.new(color.yellow, 0), size=size.small)
+plotshape(showSignals and eventStop, title="STOP LOSS", style=shape.labeldown,
+     location=location.abovebar, size=size.small, color=color.new(color.red, 0),
+     text="STOP", textcolor=color.white)
+plotshape(showSignals and eventExitEarly, title="EARLY EXIT", style=shape.labeldown,
+     location=location.abovebar, size=size.small, color=color.new(color.orange, 0),
+     text="SELL", textcolor=color.black)
+plotshape(showSignals and eventExitProtect, title="PROVEN TRADE PROTECT", style=shape.labeldown,
+     location=location.abovebar, size=size.small, color=color.new(color.yellow, 0),
+     text="SELL", textcolor=color.black)
+plotshape(showSignals and eventExitTime, title="MOVE EXHAUSTION / TIME EXIT", style=shape.labeldown,
+     location=location.abovebar, size=size.small, color=color.new(color.gray, 10),
+     text="SELL", textcolor=color.white)
+plot(showTradeGeometry ? (reentryPendingSide != SIDE_NONE ? reentryTrigger :
+     pendingSide != SIDE_NONE ? armTrigger : na) : na,
+     "ARM Trigger", color=color.orange, linewidth=2, style=plot.style_linebr)
+plot(showTradeGeometry ? (reentryPendingSide != SIDE_NONE ? reentryInvalid :
+     pendingSide != SIDE_NONE ? armInvalid : na) : na,
+     "ARM Invalidation", color=color.red, linewidth=2, style=plot.style_linebr)
+plot(showTradeGeometry and strategy.position_size != 0 ? tradeEntry : na,
+     "Trade Entry", color=color.yellow, linewidth=2, style=plot.style_linebr)
+plot(showTradeGeometry and strategy.position_size != 0 ?
+     (not activeIsReentry and not na(tradeProfitFloor) ?
+      (strategy.position_size > 0 ? math.max(tradeStop, tradeProfitFloor) : math.min(tradeStop, tradeProfitFloor)) :
+      tradeStop) : na,
+     "Trade Stop / Profit Floor", color=color.red, linewidth=2, style=plot.style_linebr)

@@ -1,0 +1,1585 @@
+//@version=6
+//@strategy_alert_message {{strategy.order.alert_message}}
+strategy(
+     "Asads SCALPER v1.13.1 • AUTOMATION",
+     overlay = true,
+     pyramiding = 0,
+     process_orders_on_close = true,
+     calc_on_every_tick = true,
+     calc_on_order_fills = false,
+     use_bar_magnifier = true,
+     initial_capital = 100000,
+     default_qty_type = strategy.percent_of_equity,
+     default_qty_value = 10,
+     commission_type = strategy.commission.percent,
+     commission_value = 0.0,
+     max_labels_count = 500,
+     max_lines_count = 500)
+
+groupSession = "1. Session"
+
+string sessionTZ = "America/New_York"
+tradeSession = input.session("0935-1555", "Trading Window (ET)", group = groupSession)
+
+tradeMonday = input.bool(true, "Monday", group = groupSession)
+tradeTuesday = input.bool(true, "Tuesday", group = groupSession)
+tradeWednesday = input.bool(true, "Wednesday", group = groupSession)
+tradeThursday = input.bool(true, "Thursday", group = groupSession)
+tradeFriday = input.bool(true, "Friday", group = groupSession)
+
+groupLevel = "2. Historical Reaction Levels"
+
+atrLen = input.int(14, "ATR Length", minval = 2, group = groupLevel)
+
+pivotLeft = input.int(2, "Pivot Left Bars", minval = 1, maxval = 8, group = groupLevel)
+pivotRight = input.int(2, "Pivot Right Bars", minval = 1, maxval = 8, group = groupLevel)
+
+minTouches = input.int(2, "Independent Rejections Needed", minval = 2, maxval = 5, group = groupLevel)
+minTouchSeparation = input.int(3, "Minimum Bars Between Rejections", minval = 2, maxval = 30, group = groupLevel)
+
+formationDepartureATR = input.float(0.20, "Minimum Departure After Historical Touch (ATR)", minval = 0.05, step = 0.05, group = groupLevel)
+mergeRadiusATR = input.float(0.12, "Same-Level Merge Radius (ATR)", minval = 0.03, step = 0.01, group = groupLevel)
+
+zoneHalfATR = input.float(0.07, "Level Zone Half-Width (ATR)", minval = 0.02, step = 0.01, group = groupLevel)
+maxLevelAgeBars = input.int(780, "Maximum Learned-Level Age (5m Bars)", minval = 30, maxval = 2000, group = groupLevel)
+breakDistanceATR = input.float(0.12, "Confirmed Close Beyond Level Invalidates It (ATR)", minval = 0.03, step = 0.01, group = groupLevel)
+
+maxStoredLevels = input.int(64, "Maximum Stored Levels", minval = 12, maxval = 100, group = groupLevel)
+
+groupReaction = "3. Current Reaction"
+
+touchAllowanceATR = input.float(0.04, "Touch Allowance Outside Zone (ATR)", minval = 0.00, step = 0.01, group = groupReaction)
+maxPierceATR = input.float(0.24, "Maximum Intrabar Pierce Beyond Zone (ATR)", minval = 0.04, step = 0.01, group = groupReaction)
+minRejectionDisplacementATR = input.float(0.06, "Minimum High/Low-To-Close Rejection (ATR)", minval = 0.02, step = 0.01, group = groupReaction)
+reclaimATR = input.float(0.00, "Close Must Reclaim Level By (ATR)", minval = 0.00, step = 0.01, group = groupReaction)
+
+requireDirectionalBody = input.bool(false, "Require Bullish CALL / Bearish PUT Body", group = groupReaction)
+maxStructureRiskATR = input.float(0.55, "Skip If Structural Stop Wider Than ATR", minval = 0.10, step = 0.05, group = groupReaction)
+
+entryCooldownBars = input.int(0, "Bars Between New Signals", minval = 0, maxval = 20, group = groupReaction)
+
+groupConfidence = "4. Adaptive Confidence"
+
+freshBars1 = input.int(78, "Fresh Level Window (5m Bars)", minval = 20, maxval = 300, group = groupConfidence)
+freshBars2 = input.int(156, "Medium-Fresh Window (5m Bars)", minval = 40, maxval = 600, group = groupConfidence)
+
+strongThreshold = input.int(62, "STRONG Confidence Threshold", minval = 40, maxval = 90, group = groupConfidence)
+aPlusThreshold = input.int(78, "A+ Confidence Threshold", minval = 50, maxval = 98, group = groupConfidence)
+
+volumeSlotLookback = input.int(20, "Same-Time Volume EMA Days", minval = 5, maxval = 60, group = groupConfidence)
+approachBars = input.int(3, "Approach Momentum Bars", minval = 1, maxval = 8, group = groupConfidence)
+
+usePD = input.bool(true, "Use PDH/PDL Confluence", group = groupConfidence)
+usePM = input.bool(true, "Use PMH/PML Confluence", group = groupConfidence)
+useOR = input.bool(true, "Use Opening Range Confluence", group = groupConfidence)
+useVWAP = input.bool(true, "Use VWAP Confluence", group = groupConfidence)
+confluenceATR = input.float(0.12, "Classic-Level Confluence Radius (ATR)", minval = 0.02, step = 0.01, group = groupConfidence)
+
+tradeClassicLevels = input.bool(true, "Trade PD / PM / Opening Range As Reaction Levels", group = groupConfidence,
+     tooltip = "Adds obvious market reference levels as primary reaction candidates. VWAP remains confluence-only.")
+classicZoneHalfATR = input.float(0.055, "Classic Reaction Zone Half-Width (ATR)", minval = 0.01, step = 0.005, group = groupConfidence)
+
+groupExit = "5. Reaction Exit"
+
+confirmationUSD = input.float(0.01, "Favorable Move Required Before Entry ($)", minval = 0.01, step = 0.01, group = groupExit,
+     tooltip = "UNCHANGED from V1.9. The rejection close only ARMS the setup. Actual entry requires this much favorable QQQ movement after that close.")
+
+useReactionFailureStop = input.bool(true, "Use Reaction-Failure Stop", group = groupExit,
+     tooltip = "Primary V1.10A change. Exit when the confirmed reaction gives this distance back instead of waiting for the wider structural stop.")
+reactionFailureUSD = input.float(0.01, "Reaction-Failure Distance ($)", minval = 0.01, step = 0.01, group = groupExit,
+     tooltip = "Primary research test = $0.01. Predeclared fallback if needed = $0.02.")
+
+useEconomicTarget = input.bool(true, "Use Structural-Risk Economic Target", group = groupExit,
+     tooltip = "When ON, target size scales modestly with the original structural risk instead of always demanding exactly one cent.")
+economicTargetR = input.float(0.10, "Target As Fraction Of Structural Risk", minval = 0.02, maxval = 0.50, step = 0.01, group = groupExit,
+     tooltip = "0.10 means aim for roughly 10% of planned stop distance. With a 90% win-rate goal, this is near the minimum economically sensible zone before costs.")
+economicTargetMinUSD = input.float(0.01, "Minimum Target ($)", minval = 0.01, step = 0.01, group = groupExit)
+economicTargetMaxUSD = input.float(0.02, "Maximum Target ($)", minval = 0.01, step = 0.01, group = groupExit,
+     tooltip = "V1.9 deliberately caps the first experiment at 2 cents to avoid a large win-rate shock.")
+fixedTargetFallbackUSD = input.float(0.01, "Fixed Target When Economic Mode OFF ($)", minval = 0.01, step = 0.01, group = groupExit)
+
+useAdaptiveRunner = input.bool(true, "Use Adaptive Runner + Profit Lock", group = groupExit,
+     tooltip = "V1.13 default. Keeps V1.10A's fast failure behavior but asks good reactions for a larger QQQ move.")
+
+runnerTargetATR = input.float(0.08, "Runner Target ATR Fraction", minval = 0.02, maxval = 0.30, step = 0.01, group = groupExit)
+runnerPriceFloorBps = input.float(0.50, "Runner Price Floor (basis points)", minval = 0.00, maxval = 3.00, step = 0.05, group = groupExit)
+runnerMinUSD = input.float(0.03, "Runner Minimum Target ($)", minval = 0.01, step = 0.01, group = groupExit)
+runnerMaxUSD = input.float(0.12, "Runner Maximum Target ($)", minval = 0.03, step = 0.01, group = groupExit)
+
+baseTargetMult = input.float(0.85, "BASE Target Multiplier", minval = 0.50, maxval = 1.50, step = 0.05, group = groupExit)
+strongTargetMult = input.float(1.00, "STRONG Target Multiplier", minval = 0.50, maxval = 1.50, step = 0.05, group = groupExit)
+aPlusTargetMult = input.float(1.10, "A+ Target Multiplier", minval = 0.50, maxval = 1.75, step = 0.05, group = groupExit)
+
+profitLockFraction = input.float(0.35, "Profit-Lock Activation / Target", minval = 0.15, maxval = 0.70, step = 0.05, group = groupExit)
+profitLockMinUSD = input.float(0.02, "Profit-Lock Minimum Activation ($)", minval = 0.01, step = 0.01, group = groupExit)
+profitLockMaxUSD = input.float(0.04, "Profit-Lock Maximum Activation ($)", minval = 0.02, step = 0.01, group = groupExit)
+profitLockBankUSD = input.float(0.01, "Profit Locked At First Activation ($)", minval = 0.01, step = 0.01, group = groupExit)
+
+confirmationWindowBars = input.int(1, "Bars Allowed To Confirm", minval = 1, maxval = 3, group = groupExit,
+     tooltip = "UNCHANGED from V1.8. Default 1 = the reaction must begin during the very next 5-minute candle.")
+
+stopBufferATR = input.float(0.025, "Structural Stop Buffer (ATR)", minval = 0.00, step = 0.005, group = groupExit)
+
+groupSurgical = "6. 26-Year Surgical Filters"
+
+use26YSurgicalFilters = input.bool(true, "Enable 26-Year Surgical Filters", group = groupSurgical,
+     tooltip = "Blocks only four setup/time intersections that stayed below 90% in both the older and newer halves of the 26-year V1.7 export. Calibrated with a 1-bar confirmation window.")
+filterORHBase12ET = input.bool(true, "Block ORH | BASE — 12 ET Hour", group = groupSurgical)
+filterPMLBase14ET = input.bool(true, "Block PML | BASE — 14 ET Hour", group = groupSurgical)
+filterLearnedStrong13ET = input.bool(true, "Block LEARNED | STRONG — 13 ET Hour", group = groupSurgical)
+filterPDLBase11ET = input.bool(true, "Block PDL | BASE — 11 ET Hour", group = groupSurgical)
+
+groupVisual = "7. Visuals / Automation"
+
+showNearestLevels = input.bool(true, "Show Nearest Active Support / Resistance", group = groupVisual)
+showSignalLabels = input.bool(true, "Show LONG / SHORT Alert Labels", group = groupVisual)
+showTradeLines = input.bool(true, "Draw Entry / Target / Stop", group = groupVisual)
+showConfidenceData = input.bool(true, "Show Confidence In Data Window", group = groupVisual)
+showDiagnosticsTable = input.bool(true, "Show Win-Rate Diagnostics Table", group = groupVisual)
+showPriceLabels = input.bool(true, "Label ENTRY / TARGET / STOP / EXIT Prices", group = groupVisual)
+dashboardGoalWinRate = input.float(90.0, "Dashboard Goal Win Rate %", minval = 50.0, maxval = 100.0, step = 0.5, group = groupVisual)
+dashboardGoalTradesPerDay = input.float(2.0, "Dashboard Goal Trades / Day", minval = 0.1, step = 0.1, group = groupVisual)
+tintChartForDashboard = input.bool(true, "Tint Chart Background For Dashboard", group = groupVisual)
+
+if syminfo.ticker != "QQQ"
+    runtime.error("Asads SCALPER v1.13.1 is designed for QQQ only.")
+
+if timeframe.in_seconds() != 300
+    runtime.error("Use Asads SCALPER v1.13.1 on the QQQ 5-minute chart.")
+
+f_clamp(float value, float lo, float hi) =>
+    math.max(lo, math.min(hi, value))
+
+f_scale(float value, float lo, float hi, float points) =>
+    hi > lo ? points * f_clamp((value - lo) / (hi - lo), 0.0, 1.0) : 0.0
+
+f_near(float a, float b, float radius) =>
+    not na(a) and not na(b) and math.abs(a - b) <= radius
+
+f_confidenceName(int score) =>
+    string name = "BASE"
+    if score >= aPlusThreshold
+        name := "A+"
+    else if score >= strongThreshold
+        name := "STRONG"
+    name
+
+f_wrText(int wins, int trades) =>
+    trades > 0 ? str.tostring(100.0 * wins / trades, "#.0") + "%" : "n/a"
+
+f_wrValue(int wins, int trades) =>
+    trades > 0 ? 100.0 * wins / trades : na
+
+f_wrColor(int wins, int trades) =>
+    float wr = f_wrValue(wins, trades)
+    color c = color.new(color.gray, 80)
+    if not na(wr)
+        if wr >= 90
+            c := color.new(color.lime, 8)
+        else if wr >= 85
+            c := color.new(color.green, 18)
+        else if wr >= 80
+            c := color.new(color.teal, 28)
+        else if wr >= 75
+            c := color.new(color.orange, 18)
+        else
+            c := color.new(color.red, 12)
+    c
+
+f_goalText(int wins, int trades, float goal) =>
+    trades > 0 and 100.0 * wins / trades >= goal ? "PASS" : "NO"
+
+f_tradesPerDayText(int trades, int daysCount) =>
+    daysCount > 0 ? str.tostring(trades / daysCount, "#.00") : "n/a"
+
+f_yesNoColor(bool ok) =>
+    ok ? color.new(color.lime, 12) : color.new(color.red, 12)
+
+bool inTradeSession = not na(time(timeframe.period, tradeSession, sessionTZ))
+bool inRTH = not na(time(timeframe.period, "0930-1600", sessionTZ))
+bool inOR = not na(time(timeframe.period, "0930-0945", sessionTZ))
+bool newDay = ta.change(time("D")) != 0
+
+bool dayAllowed = (
+     (dayofweek == dayofweek.monday and tradeMonday) or
+     (dayofweek == dayofweek.tuesday and tradeTuesday) or
+     (dayofweek == dayofweek.wednesday and tradeWednesday) or
+     (dayofweek == dayofweek.thursday and tradeThursday) or
+     (dayofweek == dayofweek.friday and tradeFriday))
+
+float atr = ta.atr(atrLen)
+float atrSafe = math.max(atr, syminfo.mintick)
+float contextATR = math.max(nz(atr[1], atr), syminfo.mintick)
+
+float zoneHalf = zoneHalfATR * contextATR
+float touchAllowance = touchAllowanceATR * contextATR
+float maxPierce = maxPierceATR * contextATR
+float reclaimDistance = reclaimATR * contextATR
+float stopBuffer = math.max(2.0 * syminfo.mintick, stopBufferATR * contextATR)
+
+var array<float> slotVolumeEMA = array.new_float(78, na)
+
+int minutesFromOpen = hour(time, sessionTZ) * 60 + minute(time, sessionTZ) - 570
+int slotIndex = int(math.floor(minutesFromOpen / 5.0))
+bool validSlot = inRTH and slotIndex >= 0 and slotIndex < 78
+
+float priorSlotVolume = validSlot ? array.get(slotVolumeEMA, slotIndex) : na
+float slotRVOL = not na(priorSlotVolume) and priorSlotVolume > 0 ? volume / priorSlotVolume : 1.0
+
+var float currentRTHHigh = na
+var float currentRTHLow = na
+var float previousRTHHigh = na
+var float previousRTHLow = na
+
+bool firstRTHBar = session.isfirstbar_regular
+var int rthDaysSeen = 0
+
+if firstRTHBar
+    rthDaysSeen += 1
+
+if firstRTHBar
+    if not na(currentRTHHigh) and not na(currentRTHLow)
+        previousRTHHigh := currentRTHHigh
+        previousRTHLow := currentRTHLow
+
+    currentRTHHigh := high
+    currentRTHLow := low
+else if inRTH
+    currentRTHHigh := na(currentRTHHigh) ? high : math.max(currentRTHHigh, high)
+    currentRTHLow := na(currentRTHLow) ? low : math.min(currentRTHLow, low)
+
+float pdh = usePD ? previousRTHHigh : na
+float pdl = usePD ? previousRTHLow : na
+
+f_pmLevels() =>
+    var float pmH = na
+    var float pmL = na
+    bool pmNewDay = ta.change(time("D")) != 0
+
+    if pmNewDay
+        pmH := na
+        pmL := na
+
+    if session.ispremarket
+        pmH := na(pmH) ? high : math.max(pmH, high)
+        pmL := na(pmL) ? low : math.min(pmL, low)
+
+    [pmH, pmL]
+
+string extendedTicker = ticker.new(syminfo.prefix, syminfo.ticker, session.extended)
+[pmHighRaw, pmLowRaw] = request.security(
+     extendedTicker,
+     "5",
+     f_pmLevels(),
+     gaps = barmerge.gaps_off,
+     lookahead = barmerge.lookahead_off)
+
+float pmHigh = usePM ? pmHighRaw : na
+float pmLow = usePM ? pmLowRaw : na
+
+var float orHighState = na
+var float orLowState = na
+
+if newDay
+    orHighState := na
+    orLowState := na
+
+if inOR
+    orHighState := na(orHighState) ? high : math.max(orHighState, high)
+    orLowState := na(orLowState) ? low : math.min(orLowState, low)
+
+bool orReady = inRTH and not inOR and not na(orHighState) and not na(orLowState)
+float orHigh = useOR and orReady ? orHighState : na
+float orLow = useOR and orReady ? orLowState : na
+
+float rthVWAP = ta.vwap(hlc3, session.isfirstbar_regular)
+float currentVWAP = useVWAP and inRTH ? rthVWAP : na
+
+var array<float> levelPrice = array.new_float()
+var array<int> levelRole = array.new_int()
+var array<int> levelTouches = array.new_int()
+var array<int> levelLastTouchBar = array.new_int()
+var array<int> levelCreatedBar = array.new_int()
+var array<float> levelQuality = array.new_float()
+var array<bool> levelActive = array.new_bool()
+
+float pivotH = ta.pivothigh(high, pivotLeft, pivotRight)
+float pivotL = ta.pivotlow(low, pivotLeft, pivotRight)
+
+if not na(pivotH)
+    int pivotBarH = bar_index - pivotRight
+    float pivotAtrH = math.max(nz(atr[pivotRight], atr), syminfo.mintick)
+    float postPivotLow = ta.lowest(low, pivotRight + 1)
+    float departureH = (pivotH - postPivotLow) / pivotAtrH
+
+    if departureH >= formationDepartureATR
+        float mergeRadiusH = mergeRadiusATR * pivotAtrH
+        int bestIndexH = -1
+        float bestDistanceH = 1e10
+
+        int countH = array.size(levelPrice)
+        if countH > 0
+            for i = 0 to countH - 1
+                if array.get(levelActive, i) and array.get(levelRole, i) == -1
+                    float rememberedH = array.get(levelPrice, i)
+                    int lastTouchH = array.get(levelLastTouchBar, i)
+                    float distanceH = math.abs(pivotH - rememberedH)
+
+                    if distanceH <= mergeRadiusH and pivotBarH - lastTouchH >= minTouchSeparation
+                        if distanceH < bestDistanceH
+                            bestDistanceH := distanceH
+                            bestIndexH := i
+
+        if bestIndexH >= 0
+            int oldTouchesH = array.get(levelTouches, bestIndexH)
+            float oldPriceH = array.get(levelPrice, bestIndexH)
+            float oldQualityH = array.get(levelQuality, bestIndexH)
+            int newTouchesH = oldTouchesH + 1
+
+            array.set(levelPrice, bestIndexH, (oldPriceH * oldTouchesH + pivotH) / newTouchesH)
+            array.set(levelTouches, bestIndexH, newTouchesH)
+            array.set(levelLastTouchBar, bestIndexH, pivotBarH)
+            array.set(levelQuality, bestIndexH, (oldQualityH * oldTouchesH + departureH) / newTouchesH)
+        else
+            array.push(levelPrice, pivotH)
+            array.push(levelRole, -1)
+            array.push(levelTouches, 1)
+            array.push(levelLastTouchBar, pivotBarH)
+            array.push(levelCreatedBar, pivotBarH)
+            array.push(levelQuality, departureH)
+            array.push(levelActive, true)
+
+if not na(pivotL)
+    int pivotBarL = bar_index - pivotRight
+    float pivotAtrL = math.max(nz(atr[pivotRight], atr), syminfo.mintick)
+    float postPivotHigh = ta.highest(high, pivotRight + 1)
+    float departureL = (postPivotHigh - pivotL) / pivotAtrL
+
+    if departureL >= formationDepartureATR
+        float mergeRadiusL = mergeRadiusATR * pivotAtrL
+        int bestIndexL = -1
+        float bestDistanceL = 1e10
+
+        int countL = array.size(levelPrice)
+        if countL > 0
+            for i = 0 to countL - 1
+                if array.get(levelActive, i) and array.get(levelRole, i) == 1
+                    float rememberedL = array.get(levelPrice, i)
+                    int lastTouchL = array.get(levelLastTouchBar, i)
+                    float distanceL = math.abs(pivotL - rememberedL)
+
+                    if distanceL <= mergeRadiusL and pivotBarL - lastTouchL >= minTouchSeparation
+                        if distanceL < bestDistanceL
+                            bestDistanceL := distanceL
+                            bestIndexL := i
+
+        if bestIndexL >= 0
+            int oldTouchesL = array.get(levelTouches, bestIndexL)
+            float oldPriceL = array.get(levelPrice, bestIndexL)
+            float oldQualityL = array.get(levelQuality, bestIndexL)
+            int newTouchesL = oldTouchesL + 1
+
+            array.set(levelPrice, bestIndexL, (oldPriceL * oldTouchesL + pivotL) / newTouchesL)
+            array.set(levelTouches, bestIndexL, newTouchesL)
+            array.set(levelLastTouchBar, bestIndexL, pivotBarL)
+            array.set(levelQuality, bestIndexL, (oldQualityL * oldTouchesL + departureL) / newTouchesL)
+        else
+            array.push(levelPrice, pivotL)
+            array.push(levelRole, 1)
+            array.push(levelTouches, 1)
+            array.push(levelLastTouchBar, pivotBarL)
+            array.push(levelCreatedBar, pivotBarL)
+            array.push(levelQuality, departureL)
+            array.push(levelActive, true)
+
+while array.size(levelPrice) > maxStoredLevels
+    array.shift(levelPrice)
+    array.shift(levelRole)
+    array.shift(levelTouches)
+    array.shift(levelLastTouchBar)
+    array.shift(levelCreatedBar)
+    array.shift(levelQuality)
+    array.shift(levelActive)
+
+if barstate.isconfirmed and array.size(levelPrice) > 0
+    for i = 0 to array.size(levelPrice) - 1
+        if array.get(levelActive, i)
+            float remembered = array.get(levelPrice, i)
+            int rememberedRole = array.get(levelRole, i)
+            float breakDistance = breakDistanceATR * atrSafe
+
+            if rememberedRole == -1 and close > remembered + breakDistance
+                array.set(levelActive, i, false)
+            else if rememberedRole == 1 and close < remembered - breakDistance
+                array.set(levelActive, i, false)
+
+float activeSupport = na
+float activeResistance = na
+int supportIndex = -1
+int resistanceIndex = -1
+float supportDistance = 1e10
+float resistanceDistance = 1e10
+
+if array.size(levelPrice) > 0
+    for i = 0 to array.size(levelPrice) - 1
+        bool isActive = array.get(levelActive, i)
+        int touches = array.get(levelTouches, i)
+        int role = array.get(levelRole, i)
+        int lastTouchBar = array.get(levelLastTouchBar, i)
+        int ageBars = bar_index - lastTouchBar
+
+        bool eligible = isActive and touches >= minTouches and ageBars <= maxLevelAgeBars
+
+        if eligible and role == 1
+            float distance = math.abs(low - array.get(levelPrice, i))
+            if distance < supportDistance
+                supportDistance := distance
+                activeSupport := array.get(levelPrice, i)
+                supportIndex := i
+
+        if eligible and role == -1
+            float distance = math.abs(high - array.get(levelPrice, i))
+            if distance < resistanceDistance
+                resistanceDistance := distance
+                activeResistance := array.get(levelPrice, i)
+                resistanceIndex := i
+
+float classicSupport = na
+string classicSupportName = ""
+float classicSupportDistance = 1e10
+
+if tradeClassicLevels
+    if not na(pdl)
+        float d = math.abs(low - pdl)
+        if d < classicSupportDistance
+            classicSupport := pdl
+            classicSupportName := "PDL"
+            classicSupportDistance := d
+
+    if not na(pmLow)
+        float d = math.abs(low - pmLow)
+        if d < classicSupportDistance
+            classicSupport := pmLow
+            classicSupportName := "PML"
+            classicSupportDistance := d
+
+    if not na(orLow)
+        float d = math.abs(low - orLow)
+        if d < classicSupportDistance
+            classicSupport := orLow
+            classicSupportName := "ORL"
+            classicSupportDistance := d
+
+float classicResistance = na
+string classicResistanceName = ""
+float classicResistanceDistance = 1e10
+
+if tradeClassicLevels
+    if not na(pdh)
+        float d = math.abs(high - pdh)
+        if d < classicResistanceDistance
+            classicResistance := pdh
+            classicResistanceName := "PDH"
+            classicResistanceDistance := d
+
+    if not na(pmHigh)
+        float d = math.abs(high - pmHigh)
+        if d < classicResistanceDistance
+            classicResistance := pmHigh
+            classicResistanceName := "PMH"
+            classicResistanceDistance := d
+
+    if not na(orHigh)
+        float d = math.abs(high - orHigh)
+        if d < classicResistanceDistance
+            classicResistance := orHigh
+            classicResistanceName := "ORH"
+            classicResistanceDistance := d
+
+float learnedSupportDistance = not na(activeSupport) ? math.abs(low - activeSupport) : 1e10
+float learnedResistanceDistance = not na(activeResistance) ? math.abs(high - activeResistance) : 1e10
+
+bool usingClassicSupport = not na(classicSupport) and classicSupportDistance < learnedSupportDistance
+bool usingClassicResistance = not na(classicResistance) and classicResistanceDistance < learnedResistanceDistance
+
+float selectedSupport = usingClassicSupport ? classicSupport : activeSupport
+float selectedResistance = usingClassicResistance ? classicResistance : activeResistance
+
+string selectedSupportName = usingClassicSupport ? classicSupportName : "LEARNED"
+string selectedResistanceName = usingClassicResistance ? classicResistanceName : "LEARNED"
+
+float selectedSupportZoneHalf = usingClassicSupport ? classicZoneHalfATR * contextATR : zoneHalf
+float selectedResistanceZoneHalf = usingClassicResistance ? classicZoneHalfATR * contextATR : zoneHalf
+
+float supportUpper = not na(selectedSupport) ? selectedSupport + selectedSupportZoneHalf : na
+float supportLower = not na(selectedSupport) ? selectedSupport - selectedSupportZoneHalf : na
+float resistanceUpper = not na(selectedResistance) ? selectedResistance + selectedResistanceZoneHalf : na
+float resistanceLower = not na(selectedResistance) ? selectedResistance - selectedResistanceZoneHalf : na
+
+float longRejectATR = (close - low) / atrSafe
+float shortRejectATR = (high - close) / atrSafe
+
+bool longApproachCorrect = not na(selectedSupport) and close[1] >= selectedSupport - selectedSupportZoneHalf
+bool shortApproachCorrect = not na(selectedResistance) and close[1] <= selectedResistance + selectedResistanceZoneHalf
+
+bool supportTouched = not na(supportUpper) and low <= supportUpper + touchAllowance
+bool resistanceTouched = not na(resistanceLower) and high >= resistanceLower - touchAllowance
+
+bool supportNotDestroyed = not na(supportLower) and low >= supportLower - maxPierce
+bool resistanceNotDestroyed = not na(resistanceUpper) and high <= resistanceUpper + maxPierce
+
+bool supportReclaimed = not na(selectedSupport) and close >= selectedSupport + reclaimDistance
+bool resistanceReclaimed = not na(selectedResistance) and close <= selectedResistance - reclaimDistance
+
+bool longBodyOK = not requireDirectionalBody or close > open
+bool shortBodyOK = not requireDirectionalBody or close < open
+
+bool basicLongReaction = (
+     longApproachCorrect and
+     supportTouched and
+     supportNotDestroyed and
+     supportReclaimed and
+     longRejectATR >= minRejectionDisplacementATR and
+     longBodyOK)
+
+bool basicShortReaction = (
+     shortApproachCorrect and
+     resistanceTouched and
+     resistanceNotDestroyed and
+     resistanceReclaimed and
+     shortRejectATR >= minRejectionDisplacementATR and
+     shortBodyOK)
+
+int supportTouches = usingClassicSupport ? 2 : supportIndex >= 0 ? array.get(levelTouches, supportIndex) : 0
+int resistanceTouches = usingClassicResistance ? 2 : resistanceIndex >= 0 ? array.get(levelTouches, resistanceIndex) : 0
+
+float supportQuality = usingClassicSupport ? 0.45 : supportIndex >= 0 ? array.get(levelQuality, supportIndex) : 0.0
+float resistanceQuality = usingClassicResistance ? 0.45 : resistanceIndex >= 0 ? array.get(levelQuality, resistanceIndex) : 0.0
+
+int supportAge = usingClassicSupport ? 0 : supportIndex >= 0 ? bar_index - array.get(levelLastTouchBar, supportIndex) : 1000000
+int resistanceAge = usingClassicResistance ? 0 : resistanceIndex >= 0 ? bar_index - array.get(levelLastTouchBar, resistanceIndex) : 1000000
+
+int supportConfluence = 0
+int resistanceConfluence = 0
+float classicRadius = confluenceATR * contextATR
+
+if not na(selectedSupport)
+    supportConfluence += f_near(selectedSupport, pdl, classicRadius) ? 1 : 0
+    supportConfluence += f_near(selectedSupport, pmLow, classicRadius) ? 1 : 0
+    supportConfluence += f_near(selectedSupport, orLow, classicRadius) ? 1 : 0
+    supportConfluence += f_near(selectedSupport, currentVWAP, classicRadius) ? 1 : 0
+
+if not na(selectedResistance)
+    resistanceConfluence += f_near(selectedResistance, pdh, classicRadius) ? 1 : 0
+    resistanceConfluence += f_near(selectedResistance, pmHigh, classicRadius) ? 1 : 0
+    resistanceConfluence += f_near(selectedResistance, orHigh, classicRadius) ? 1 : 0
+    resistanceConfluence += f_near(selectedResistance, currentVWAP, classicRadius) ? 1 : 0
+
+float approachMoveATR = (close[1] - close[1 + approachBars]) / contextATR
+
+float barSpan = math.max(high - low, syminfo.mintick)
+float lowerWickFraction = (math.min(open, close) - low) / barSpan
+float upperWickFraction = (high - math.max(open, close)) / barSpan
+float longCloseLocation = (close - low) / barSpan
+float shortCloseLocation = (high - close) / barSpan
+
+float longScoreRaw = 40.0
+longScoreRaw += supportTouches >= 3 ? 6.0 : 0.0
+longScoreRaw += supportTouches >= 4 ? 4.0 : 0.0
+longScoreRaw += supportAge <= freshBars1 ? 10.0 : supportAge <= freshBars2 ? 6.0 : 2.0
+longScoreRaw += f_scale(supportQuality, formationDepartureATR, 0.90, 10.0)
+longScoreRaw += math.min(10.0, supportConfluence * 3.0)
+longScoreRaw += f_scale(longRejectATR, minRejectionDisplacementATR, 0.45, 10.0)
+longScoreRaw += f_scale(longCloseLocation, 0.50, 0.90, 5.0)
+longScoreRaw += f_scale(lowerWickFraction, 0.10, 0.55, 4.0)
+longScoreRaw += slotRVOL >= 1.50 ? 7.0 : slotRVOL >= 1.15 ? 4.0 : 0.0
+longScoreRaw -= approachMoveATR < -0.90 ? 12.0 : approachMoveATR < -0.60 ? 6.0 : 0.0
+
+float shortScoreRaw = 40.0
+shortScoreRaw += resistanceTouches >= 3 ? 6.0 : 0.0
+shortScoreRaw += resistanceTouches >= 4 ? 4.0 : 0.0
+shortScoreRaw += resistanceAge <= freshBars1 ? 10.0 : resistanceAge <= freshBars2 ? 6.0 : 2.0
+shortScoreRaw += f_scale(resistanceQuality, formationDepartureATR, 0.90, 10.0)
+shortScoreRaw += math.min(10.0, resistanceConfluence * 3.0)
+shortScoreRaw += f_scale(shortRejectATR, minRejectionDisplacementATR, 0.45, 10.0)
+shortScoreRaw += f_scale(shortCloseLocation, 0.50, 0.90, 5.0)
+shortScoreRaw += f_scale(upperWickFraction, 0.10, 0.55, 4.0)
+shortScoreRaw += slotRVOL >= 1.50 ? 7.0 : slotRVOL >= 1.15 ? 4.0 : 0.0
+shortScoreRaw -= approachMoveATR > 0.90 ? 12.0 : approachMoveATR > 0.60 ? 6.0 : 0.0
+
+int longConfidence = int(math.round(f_clamp(longScoreRaw, 0.0, 100.0)))
+int shortConfidence = int(math.round(f_clamp(shortScoreRaw, 0.0, 100.0)))
+
+string longConfidenceName = f_confidenceName(longConfidence)
+string shortConfidenceName = f_confidenceName(shortConfidence)
+
+float confirmationMove = math.max(syminfo.mintick, confirmationUSD)
+
+f_roundTick(float value) =>
+    math.round(value / syminfo.mintick) * syminfo.mintick
+
+f_targetDistanceFromRisk(float structuralRiskUSD) =>
+    float fixedFallback = math.max(syminfo.mintick, fixedTargetFallbackUSD)
+    float rawEconomic = structuralRiskUSD * economicTargetR
+    float boundedEconomic = math.max(economicTargetMinUSD, math.min(economicTargetMaxUSD, rawEconomic))
+    float selected = useEconomicTarget ? boundedEconomic : fixedFallback
+    math.max(syminfo.mintick, f_roundTick(selected))
+
+float longStopPlan = not na(supportLower) ? math.min(low, supportLower) - stopBuffer : na
+float shortStopPlan = not na(resistanceUpper) ? math.max(high, resistanceUpper) + stopBuffer : na
+
+float longConfirmPlan = f_roundTick(close + confirmationMove)
+float shortConfirmPlan = f_roundTick(close - confirmationMove)
+
+float longStructureRiskUSD = not na(longStopPlan) ? longConfirmPlan - longStopPlan : na
+float shortStructureRiskUSD = not na(shortStopPlan) ? shortStopPlan - shortConfirmPlan : na
+
+float failureDistance = math.max(syminfo.mintick, reactionFailureUSD)
+float longFailureStopPlan = f_roundTick(longConfirmPlan - failureDistance)
+float shortFailureStopPlan = f_roundTick(shortConfirmPlan + failureDistance)
+
+float longEffectiveStopPlan = useReactionFailureStop ? math.max(longStopPlan, longFailureStopPlan) : longStopPlan
+float shortEffectiveStopPlan = useReactionFailureStop ? math.min(shortStopPlan, shortFailureStopPlan) : shortStopPlan
+
+float legacyLongTargetPlan = not na(longStructureRiskUSD) ? f_targetDistanceFromRisk(longStructureRiskUSD) : economicTargetMinUSD
+float legacyShortTargetPlan = not na(shortStructureRiskUSD) ? f_targetDistanceFromRisk(shortStructureRiskUSD) : economicTargetMinUSD
+
+float runnerATRPlan = runnerTargetATR * contextATR
+float runnerPricePlan = close * runnerPriceFloorBps / 10000.0
+float runnerBasePlan = math.max(runnerMinUSD, math.min(runnerMaxUSD, math.max(runnerATRPlan, runnerPricePlan)))
+
+float longQualityMult = longConfidenceName == "A+" ? aPlusTargetMult : longConfidenceName == "STRONG" ? strongTargetMult : baseTargetMult
+float shortQualityMult = shortConfidenceName == "A+" ? aPlusTargetMult : shortConfidenceName == "STRONG" ? strongTargetMult : baseTargetMult
+
+float longRunnerTargetPlan = f_roundTick(math.max(runnerMinUSD, math.min(runnerMaxUSD, runnerBasePlan * longQualityMult)))
+float shortRunnerTargetPlan = f_roundTick(math.max(runnerMinUSD, math.min(runnerMaxUSD, runnerBasePlan * shortQualityMult)))
+
+float longTargetDistancePlan = useAdaptiveRunner ? longRunnerTargetPlan : legacyLongTargetPlan
+float shortTargetDistancePlan = useAdaptiveRunner ? shortRunnerTargetPlan : legacyShortTargetPlan
+
+int longTargetTicksPlan = math.max(1, int(math.round(longTargetDistancePlan / syminfo.mintick)))
+int shortTargetTicksPlan = math.max(1, int(math.round(shortTargetDistancePlan / syminfo.mintick)))
+
+int failureStopTicks = math.max(1, int(math.round(failureDistance / syminfo.mintick)))
+
+float longLockActivationPlan = f_roundTick(math.max(profitLockMinUSD, math.min(profitLockMaxUSD, longTargetDistancePlan * profitLockFraction)))
+float shortLockActivationPlan = f_roundTick(math.max(profitLockMinUSD, math.min(profitLockMaxUSD, shortTargetDistancePlan * profitLockFraction)))
+
+float longLockTrailPlan = f_roundTick(math.max(syminfo.mintick, longLockActivationPlan - profitLockBankUSD))
+float shortLockTrailPlan = f_roundTick(math.max(syminfo.mintick, shortLockActivationPlan - profitLockBankUSD))
+
+int longLockActivationTicksPlan = math.max(1, int(math.round(longLockActivationPlan / syminfo.mintick)))
+int shortLockActivationTicksPlan = math.max(1, int(math.round(shortLockActivationPlan / syminfo.mintick)))
+int longLockTrailTicksPlan = math.max(1, int(math.round(longLockTrailPlan / syminfo.mintick)))
+int shortLockTrailTicksPlan = math.max(1, int(math.round(shortLockTrailPlan / syminfo.mintick)))
+
+float longStructureRiskATR = not na(longStopPlan) ? (close - longStopPlan) / atrSafe : 999.0
+float shortStructureRiskATR = not na(shortStopPlan) ? (shortStopPlan - close) / atrSafe : 999.0
+
+bool longRiskOK = longStructureRiskATR > 0 and longStructureRiskATR <= maxStructureRiskATR
+bool shortRiskOK = shortStructureRiskATR > 0 and shortStructureRiskATR <= maxStructureRiskATR
+
+varip int activeDir = 0                 // 0 flat, +1 armed/live long, -1 armed/live short
+varip bool activeFilled = false
+varip float activeSignalClose = na
+varip float activeConfirmPrice = na
+varip float activeEntry = na
+varip float activeStop = na
+varip float activeStructuralStop = na
+varip float activeFailureStop = na
+varip float activeTarget = na
+varip float activeTargetDistance = na
+varip int activeTargetTicks = 1
+varip int activeLockActivationTicks = 1
+varip int activeLockTrailTicks = 1
+varip float activeLockActivationDistance = na
+varip float activeLockTrailDistance = na
+varip float activePlannedRiskUSD = na
+varip float activeLevel = na
+varip float activeATR = na
+varip int activeConfidence = 0
+varip string activeConfidenceName = ""
+varip string activeLevelName = ""
+varip int activeSignalBar = na
+varip int activeEntryBar = na
+varip string forcedExitReason = ""
+varip int lastClosedTradeCount = 0
+var int lastSignalBar = na
+
+var line armedConfirmLine = na
+var line tradeEntryLine = na
+var line tradeTargetLine = na
+var line tradeStopLine = na
+var line tradeStructuralStopLine = na
+
+var int diagArmedAll = 0
+var int diagExpiredAll = 0
+
+var int diagFilteredAll = 0
+var int diagTarget1Cent = 0
+var int diagTarget2Cent = 0
+var float diagTargetCentsSum = 0.0
+
+var int diagExitTarget = 0
+var int diagExitFailure = 0
+var int diagExitStructural = 0
+var int diagExitOther = 0
+var float diagPnlTarget = 0.0
+var float diagPnlFailure = 0.0
+var float diagPnlStructural = 0.0
+var float diagPnlOther = 0.0
+
+var int diagFilterORHBase12 = 0
+var int diagFilterPMLBase14 = 0
+var int diagFilterLearnedStrong13 = 0
+var int diagFilterPDLBase11 = 0
+
+var int diagTradesAll = 0
+var int diagWinsAll = 0
+var int diagTradesLong = 0
+var int diagWinsLong = 0
+var int diagTradesShort = 0
+var int diagWinsShort = 0
+
+var int diagTradesLearned = 0
+var int diagWinsLearned = 0
+var int diagTradesPDH = 0
+var int diagWinsPDH = 0
+var int diagTradesPDL = 0
+var int diagWinsPDL = 0
+var int diagTradesPMH = 0
+var int diagWinsPMH = 0
+var int diagTradesPML = 0
+var int diagWinsPML = 0
+var int diagTradesORH = 0
+var int diagWinsORH = 0
+var int diagTradesORL = 0
+var int diagWinsORL = 0
+
+var int diagTradesBase = 0
+var int diagWinsBase = 0
+var int diagTradesStrong = 0
+var int diagWinsStrong = 0
+var int diagTradesAPlus = 0
+var int diagWinsAPlus = 0
+
+bool longEntryEvent = false
+bool shortEntryEvent = false
+bool sellExitEvent = false
+bool expiredSetupEvent = false
+
+bool flatAndReady = strategy.position_size == 0 and activeDir == 0
+bool cooldownOK = na(lastSignalBar) or bar_index - lastSignalBar > entryCooldownBars
+
+bool rawConfirmedLongSignal = (
+     barstate.isconfirmed and
+     inTradeSession and
+     dayAllowed and
+     flatAndReady and
+     cooldownOK and
+     basicLongReaction and
+     longRiskOK)
+
+bool rawConfirmedShortSignal = (
+     barstate.isconfirmed and
+     inTradeSession and
+     dayAllowed and
+     flatAndReady and
+     cooldownOK and
+     basicShortReaction and
+     shortRiskOK)
+
+int prospectiveConfirmHourET = hour(time_close, sessionTZ)
+
+bool blockPMLBase14Long = (
+     use26YSurgicalFilters and
+     filterPMLBase14ET and
+     selectedSupportName == "PML" and
+     longConfidenceName == "BASE" and
+     prospectiveConfirmHourET == 14)
+
+bool blockPDLBase11Long = (
+     use26YSurgicalFilters and
+     filterPDLBase11ET and
+     selectedSupportName == "PDL" and
+     longConfidenceName == "BASE" and
+     prospectiveConfirmHourET == 11)
+
+bool blockLearnedStrong13Long = (
+     use26YSurgicalFilters and
+     filterLearnedStrong13ET and
+     selectedSupportName == "LEARNED" and
+     longConfidenceName == "STRONG" and
+     prospectiveConfirmHourET == 13)
+
+bool blockORHBase12Short = (
+     use26YSurgicalFilters and
+     filterORHBase12ET and
+     selectedResistanceName == "ORH" and
+     shortConfidenceName == "BASE" and
+     prospectiveConfirmHourET == 12)
+
+bool blockLearnedStrong13Short = (
+     use26YSurgicalFilters and
+     filterLearnedStrong13ET and
+     selectedResistanceName == "LEARNED" and
+     shortConfidenceName == "STRONG" and
+     prospectiveConfirmHourET == 13)
+
+bool surgicalBlockLong = blockPMLBase14Long or blockPDLBase11Long or blockLearnedStrong13Long
+bool surgicalBlockShort = blockORHBase12Short or blockLearnedStrong13Short
+
+if rawConfirmedLongSignal and surgicalBlockLong
+    diagFilteredAll += 1
+    if blockPMLBase14Long
+        diagFilterPMLBase14 += 1
+    if blockPDLBase11Long
+        diagFilterPDLBase11 += 1
+    if blockLearnedStrong13Long
+        diagFilterLearnedStrong13 += 1
+
+if rawConfirmedShortSignal and surgicalBlockShort
+    diagFilteredAll += 1
+    if blockORHBase12Short
+        diagFilterORHBase12 += 1
+    if blockLearnedStrong13Short
+        diagFilterLearnedStrong13 += 1
+
+bool confirmedLongSignal = rawConfirmedLongSignal and not surgicalBlockLong
+bool confirmedShortSignal = rawConfirmedShortSignal and not surgicalBlockShort
+
+bool takeLongSignal = confirmedLongSignal and (not confirmedShortSignal or longConfidence > shortConfidence)
+bool takeShortSignal = confirmedShortSignal and (not confirmedLongSignal or shortConfidence > longConfidence)
+
+if takeLongSignal
+    activeDir := 1
+    activeFilled := false
+    activeSignalClose := close
+    activeConfirmPrice := longConfirmPlan
+    activeEntry := activeConfirmPrice
+    activeStructuralStop := longStopPlan
+    activeFailureStop := longFailureStopPlan
+    activeStop := longEffectiveStopPlan
+    activePlannedRiskUSD := longStructureRiskUSD
+    activeTargetDistance := longTargetDistancePlan
+    activeTargetTicks := longTargetTicksPlan
+    activeLockActivationTicks := longLockActivationTicksPlan
+    activeLockTrailTicks := longLockTrailTicksPlan
+    activeLockActivationDistance := longLockActivationPlan
+    activeLockTrailDistance := longLockTrailPlan
+    activeTarget := f_roundTick(activeConfirmPrice + activeTargetDistance)
+    activeLevel := selectedSupport
+    activeATR := contextATR
+    activeConfidence := longConfidence
+    activeConfidenceName := longConfidenceName
+    activeLevelName := selectedSupportName
+    activeSignalBar := bar_index
+    activeEntryBar := na
+    forcedExitReason := ""
+    lastSignalBar := bar_index
+    diagArmedAll += 1
+    diagTargetCentsSum += activeTargetDistance / syminfo.mintick
+    if activeTargetTicks <= 1
+        diagTarget1Cent += 1
+    else
+        diagTarget2Cent += 1
+
+    string longFillAlert = (
+         "SOURCE SCALPER | LONG QQQ | REACTION CONFIRMED" +
+         " | TRIGGER " + str.tostring(activeConfirmPrice, format.mintick) +
+         " | TARGET +" + str.tostring(activeTargetDistance, format.mintick) +
+         " | FAILURE_SL " + str.tostring(activeFailureStop, format.mintick) +
+         " | STRUCT_SL " + str.tostring(activeStructuralStop, format.mintick) +
+         " | LEVEL " + str.tostring(activeLevel, format.mintick) +
+         " | LEVEL_TYPE " + activeLevelName +
+         " | CONF " + activeConfidenceName +
+         " | SCORE " + str.tostring(activeConfidence) +
+         " | TV_TS " + str.tostring(timenow))
+
+    strategy.entry(
+         "CALL CONFIRM",
+         strategy.long,
+         stop = activeConfirmPrice,
+         comment = activeLevelName + "|" + activeConfidenceName,
+         alert_message = longFillAlert)
+
+    if useAdaptiveRunner and useReactionFailureStop
+        strategy.exit(
+             "CALL BRACKET",
+             from_entry = "CALL CONFIRM",
+             profit = activeTargetTicks,
+             loss = failureStopTicks,
+             trail_points = activeLockActivationTicks,
+             trail_offset = activeLockTrailTicks,
+             alert_message = "SOURCE SCALPER | EXIT QQQ | REACTION BRACKET | TV_TS " + str.tostring(timenow),
+             alert_profit = "SOURCE SCALPER | EXIT QQQ | REACTION TARGET | TV_TS " + str.tostring(timenow),
+             alert_loss = "SOURCE SCALPER | EXIT QQQ | STOP | TV_TS " + str.tostring(timenow),
+             alert_trailing = "SOURCE SCALPER | EXIT QQQ | PROFIT LOCK / RUNNER | TV_TS " + str.tostring(timenow))
+    else
+        strategy.exit(
+             "CALL BRACKET",
+             from_entry = "CALL CONFIRM",
+             profit = activeTargetTicks,
+             stop = activeStop,
+             alert_message = "SOURCE SCALPER | EXIT QQQ | REACTION BRACKET | TV_TS " + str.tostring(timenow),
+             alert_profit = "SOURCE SCALPER | EXIT QQQ | REACTION TARGET | TV_TS " + str.tostring(timenow),
+             alert_loss = "SOURCE SCALPER | EXIT QQQ | STOP | TV_TS " + str.tostring(timenow),
+             alert_trailing = "SOURCE SCALPER | EXIT QQQ | PROFIT LOCK / RUNNER | TV_TS " + str.tostring(timenow))
+
+    if showTradeLines
+        armedConfirmLine := line.new(
+             bar_index,
+             activeConfirmPrice,
+             bar_index + confirmationWindowBars + 1,
+             activeConfirmPrice,
+             color = color.orange,
+             width = 2,
+             style = line.style_dotted)
+
+    if showSignalLabels
+        label.new(
+             bar_index,
+             low,
+             "ARM LONG QQQ\n" +
+             "NO ENTRY YET\n" +
+             "TRIGGER " + str.tostring(activeConfirmPrice, format.mintick) +
+             "\nTHEN TARGET +" + str.tostring(activeTargetDistance, format.mintick) +
+             "\nFAIL SL " + str.tostring(activeFailureStop, format.mintick) +
+             "\nSTRUCT " + str.tostring(activeStructuralStop, format.mintick) +
+             "\nTYPE " + activeLevelName +
+             "\n" + activeConfidenceName + " " + str.tostring(activeConfidence),
+             style = label.style_label_up,
+             color = color.orange,
+             textcolor = color.black,
+             size = size.small)
+
+else if takeShortSignal
+    activeDir := -1
+    activeFilled := false
+    activeSignalClose := close
+    activeConfirmPrice := shortConfirmPlan
+    activeEntry := activeConfirmPrice
+    activeStructuralStop := shortStopPlan
+    activeFailureStop := shortFailureStopPlan
+    activeStop := shortEffectiveStopPlan
+    activePlannedRiskUSD := shortStructureRiskUSD
+    activeTargetDistance := shortTargetDistancePlan
+    activeTargetTicks := shortTargetTicksPlan
+    activeLockActivationTicks := shortLockActivationTicksPlan
+    activeLockTrailTicks := shortLockTrailTicksPlan
+    activeLockActivationDistance := shortLockActivationPlan
+    activeLockTrailDistance := shortLockTrailPlan
+    activeTarget := f_roundTick(activeConfirmPrice - activeTargetDistance)
+    activeLevel := selectedResistance
+    activeATR := contextATR
+    activeConfidence := shortConfidence
+    activeConfidenceName := shortConfidenceName
+    activeLevelName := selectedResistanceName
+    activeSignalBar := bar_index
+    activeEntryBar := na
+    forcedExitReason := ""
+    lastSignalBar := bar_index
+    diagArmedAll += 1
+    diagTargetCentsSum += activeTargetDistance / syminfo.mintick
+    if activeTargetTicks <= 1
+        diagTarget1Cent += 1
+    else
+        diagTarget2Cent += 1
+
+    string shortFillAlert = (
+         "SOURCE SCALPER | SHORT QQQ | REACTION CONFIRMED" +
+         " | TRIGGER " + str.tostring(activeConfirmPrice, format.mintick) +
+         " | TARGET -" + str.tostring(activeTargetDistance, format.mintick) +
+         " | FAILURE_SL " + str.tostring(activeFailureStop, format.mintick) +
+         " | STRUCT_SL " + str.tostring(activeStructuralStop, format.mintick) +
+         " | LEVEL " + str.tostring(activeLevel, format.mintick) +
+         " | LEVEL_TYPE " + activeLevelName +
+         " | CONF " + activeConfidenceName +
+         " | SCORE " + str.tostring(activeConfidence) +
+         " | TV_TS " + str.tostring(timenow))
+
+    strategy.entry(
+         "PUT CONFIRM",
+         strategy.short,
+         stop = activeConfirmPrice,
+         comment = activeLevelName + "|" + activeConfidenceName,
+         alert_message = shortFillAlert)
+
+    if useAdaptiveRunner and useReactionFailureStop
+        strategy.exit(
+             "PUT BRACKET",
+             from_entry = "PUT CONFIRM",
+             profit = activeTargetTicks,
+             loss = failureStopTicks,
+             trail_points = activeLockActivationTicks,
+             trail_offset = activeLockTrailTicks,
+             alert_message = "SOURCE SCALPER | EXIT QQQ | REACTION BRACKET | TV_TS " + str.tostring(timenow),
+             alert_profit = "SOURCE SCALPER | EXIT QQQ | REACTION TARGET | TV_TS " + str.tostring(timenow),
+             alert_loss = "SOURCE SCALPER | EXIT QQQ | STOP | TV_TS " + str.tostring(timenow),
+             alert_trailing = "SOURCE SCALPER | EXIT QQQ | PROFIT LOCK / RUNNER | TV_TS " + str.tostring(timenow))
+    else
+        strategy.exit(
+             "PUT BRACKET",
+             from_entry = "PUT CONFIRM",
+             profit = activeTargetTicks,
+             stop = activeStop,
+             alert_message = "SOURCE SCALPER | EXIT QQQ | REACTION BRACKET | TV_TS " + str.tostring(timenow),
+             alert_profit = "SOURCE SCALPER | EXIT QQQ | REACTION TARGET | TV_TS " + str.tostring(timenow),
+             alert_loss = "SOURCE SCALPER | EXIT QQQ | STOP | TV_TS " + str.tostring(timenow),
+             alert_trailing = "SOURCE SCALPER | EXIT QQQ | PROFIT LOCK / RUNNER | TV_TS " + str.tostring(timenow))
+
+    if showTradeLines
+        armedConfirmLine := line.new(
+             bar_index,
+             activeConfirmPrice,
+             bar_index + confirmationWindowBars + 1,
+             activeConfirmPrice,
+             color = color.orange,
+             width = 2,
+             style = line.style_dotted)
+
+    if showSignalLabels
+        label.new(
+             bar_index,
+             high,
+             "ARM SHORT QQQ\n" +
+             "NO ENTRY YET\n" +
+             "TRIGGER " + str.tostring(activeConfirmPrice, format.mintick) +
+             "\nTHEN TARGET -" + str.tostring(activeTargetDistance, format.mintick) +
+             "\nFAIL SL " + str.tostring(activeFailureStop, format.mintick) +
+             "\nSTRUCT " + str.tostring(activeStructuralStop, format.mintick) +
+             "\nTYPE " + activeLevelName +
+             "\n" + activeConfidenceName + " " + str.tostring(activeConfidence),
+             style = label.style_label_down,
+             color = color.orange,
+             textcolor = color.black,
+             size = size.small)
+
+if strategy.position_size > 0 and activeDir == 1 and not activeFilled
+    activeFilled := true
+    activeEntry := strategy.position_avg_price
+    activeFailureStop := f_roundTick(activeEntry - failureDistance)
+    activeStop := useReactionFailureStop ? activeFailureStop : activeStructuralStop
+    activeTarget := f_roundTick(activeEntry + activeTargetDistance)
+    activeEntryBar := bar_index
+    longEntryEvent := true
+
+    if not na(armedConfirmLine)
+        line.set_color(armedConfirmLine, color.new(color.orange, 70))
+
+    if showTradeLines
+        tradeEntryLine := line.new(bar_index, activeEntry, bar_index + 1, activeEntry, color = color.white, width = 2)
+        tradeTargetLine := line.new(bar_index, activeTarget, bar_index + 1, activeTarget, color = color.lime, width = 2, style = line.style_dashed)
+        tradeStopLine := line.new(bar_index, activeStop, bar_index + 1, activeStop, color = color.red, width = 2, style = line.style_dashed)
+        tradeStructuralStopLine := line.new(bar_index, activeStructuralStop, bar_index + 1, activeStructuralStop, color = color.new(color.red, 72), width = 1, style = line.style_dotted)
+
+        if showPriceLabels
+            label.new(bar_index, activeEntry, "LONG ENTRY " + str.tostring(activeEntry, format.mintick), style = label.style_label_left, color = color.lime, textcolor = color.black, size = size.tiny)
+            label.new(bar_index, activeTarget, "TARGET " + str.tostring(activeTarget, format.mintick), style = label.style_label_left, color = color.lime, textcolor = color.black, size = size.tiny)
+            label.new(bar_index, activeStop, "FAIL STOP " + str.tostring(activeStop, format.mintick), style = label.style_label_left, color = color.red, textcolor = color.white, size = size.tiny)
+            label.new(bar_index, activeStructuralStop, "STRUCT BACKUP " + str.tostring(activeStructuralStop, format.mintick), style = label.style_label_left, color = color.new(color.red, 72), textcolor = color.white, size = size.tiny)
+
+if strategy.position_size < 0 and activeDir == -1 and not activeFilled
+    activeFilled := true
+    activeEntry := strategy.position_avg_price
+    activeFailureStop := f_roundTick(activeEntry + failureDistance)
+    activeStop := useReactionFailureStop ? activeFailureStop : activeStructuralStop
+    activeTarget := f_roundTick(activeEntry - activeTargetDistance)
+    activeEntryBar := bar_index
+    shortEntryEvent := true
+
+    if not na(armedConfirmLine)
+        line.set_color(armedConfirmLine, color.new(color.orange, 70))
+
+    if showTradeLines
+        tradeEntryLine := line.new(bar_index, activeEntry, bar_index + 1, activeEntry, color = color.white, width = 2)
+        tradeTargetLine := line.new(bar_index, activeTarget, bar_index + 1, activeTarget, color = color.lime, width = 2, style = line.style_dashed)
+        tradeStopLine := line.new(bar_index, activeStop, bar_index + 1, activeStop, color = color.red, width = 2, style = line.style_dashed)
+        tradeStructuralStopLine := line.new(bar_index, activeStructuralStop, bar_index + 1, activeStructuralStop, color = color.new(color.red, 72), width = 1, style = line.style_dotted)
+
+        if showPriceLabels
+            label.new(bar_index, activeEntry, "SHORT ENTRY " + str.tostring(activeEntry, format.mintick), style = label.style_label_left, color = color.red, textcolor = color.white, size = size.tiny)
+            label.new(bar_index, activeTarget, "TARGET " + str.tostring(activeTarget, format.mintick), style = label.style_label_left, color = color.lime, textcolor = color.black, size = size.tiny)
+            label.new(bar_index, activeStop, "FAIL STOP " + str.tostring(activeStop, format.mintick), style = label.style_label_left, color = color.red, textcolor = color.white, size = size.tiny)
+            label.new(bar_index, activeStructuralStop, "STRUCT BACKUP " + str.tostring(activeStructuralStop, format.mintick), style = label.style_label_left, color = color.new(color.red, 72), textcolor = color.white, size = size.tiny)
+
+if strategy.position_size > 0 and activeDir == 1
+    if useAdaptiveRunner and useReactionFailureStop
+        strategy.exit(
+             "CALL BRACKET",
+             from_entry = "CALL CONFIRM",
+             profit = activeTargetTicks,
+             loss = failureStopTicks,
+             trail_points = activeLockActivationTicks,
+             trail_offset = activeLockTrailTicks,
+             alert_message = "SOURCE SCALPER | EXIT QQQ | REACTION BRACKET | TV_TS " + str.tostring(timenow),
+             alert_profit = "SOURCE SCALPER | EXIT QQQ | REACTION TARGET | TV_TS " + str.tostring(timenow),
+             alert_loss = "SOURCE SCALPER | EXIT QQQ | STOP | TV_TS " + str.tostring(timenow),
+             alert_trailing = "SOURCE SCALPER | EXIT QQQ | PROFIT LOCK / RUNNER | TV_TS " + str.tostring(timenow))
+    else
+        strategy.exit(
+             "CALL BRACKET",
+             from_entry = "CALL CONFIRM",
+             profit = activeTargetTicks,
+             stop = activeStop,
+             alert_message = "SOURCE SCALPER | EXIT QQQ | REACTION BRACKET | TV_TS " + str.tostring(timenow),
+             alert_profit = "SOURCE SCALPER | EXIT QQQ | REACTION TARGET | TV_TS " + str.tostring(timenow),
+             alert_loss = "SOURCE SCALPER | EXIT QQQ | STOP | TV_TS " + str.tostring(timenow),
+             alert_trailing = "SOURCE SCALPER | EXIT QQQ | PROFIT LOCK / RUNNER | TV_TS " + str.tostring(timenow))
+
+if strategy.position_size < 0 and activeDir == -1
+    if useAdaptiveRunner and useReactionFailureStop
+        strategy.exit(
+             "PUT BRACKET",
+             from_entry = "PUT CONFIRM",
+             profit = activeTargetTicks,
+             loss = failureStopTicks,
+             trail_points = activeLockActivationTicks,
+             trail_offset = activeLockTrailTicks,
+             alert_message = "SOURCE SCALPER | EXIT QQQ | REACTION BRACKET | TV_TS " + str.tostring(timenow),
+             alert_profit = "SOURCE SCALPER | EXIT QQQ | REACTION TARGET | TV_TS " + str.tostring(timenow),
+             alert_loss = "SOURCE SCALPER | EXIT QQQ | STOP | TV_TS " + str.tostring(timenow),
+             alert_trailing = "SOURCE SCALPER | EXIT QQQ | PROFIT LOCK / RUNNER | TV_TS " + str.tostring(timenow))
+    else
+        strategy.exit(
+             "PUT BRACKET",
+             from_entry = "PUT CONFIRM",
+             profit = activeTargetTicks,
+             stop = activeStop,
+             alert_message = "SOURCE SCALPER | EXIT QQQ | REACTION BRACKET | TV_TS " + str.tostring(timenow),
+             alert_profit = "SOURCE SCALPER | EXIT QQQ | REACTION TARGET | TV_TS " + str.tostring(timenow),
+             alert_loss = "SOURCE SCALPER | EXIT QQQ | STOP | TV_TS " + str.tostring(timenow),
+             alert_trailing = "SOURCE SCALPER | EXIT QQQ | PROFIT LOCK / RUNNER | TV_TS " + str.tostring(timenow))
+
+if activeFilled and activeDir != 0 and showTradeLines
+    if not na(tradeEntryLine)
+        line.set_x2(tradeEntryLine, bar_index + 1)
+    if not na(tradeTargetLine)
+        line.set_x2(tradeTargetLine, bar_index + 1)
+    if not na(tradeStopLine)
+        line.set_x2(tradeStopLine, bar_index + 1)
+    if not na(tradeStructuralStopLine)
+        line.set_x2(tradeStructuralStopLine, bar_index + 1)
+
+if strategy.position_size != 0 and activeDir != 0 and activeFilled and barstate.isconfirmed
+    bool confirmationBarFinished = not na(activeSignalBar) and bar_index >= activeSignalBar + 1
+
+    if confirmationBarFinished
+        forcedExitReason := "NO IMMEDIATE FOLLOW-THROUGH"
+        strategy.close_all(
+             immediately = true,
+             alert_message = "SOURCE SCALPER | EXIT QQQ | NO IMMEDIATE FOLLOW-THROUGH | TV_TS " + str.tostring(timenow))
+
+if strategy.closedtrades > lastClosedTradeCount and activeDir != 0
+    int closedIndex = strategy.closedtrades - 1
+    float realizedEntry = strategy.closedtrades.entry_price(closedIndex)
+    float realizedExit = strategy.closedtrades.exit_price(closedIndex)
+    int realizedEntryBar = strategy.closedtrades.entry_bar_index(closedIndex)
+
+    if not activeFilled
+        activeFilled := true
+        activeEntry := realizedEntry
+        activeFailureStop := activeDir == 1 ? f_roundTick(realizedEntry - failureDistance) : f_roundTick(realizedEntry + failureDistance)
+        activeStop := useReactionFailureStop ? activeFailureStop : activeStructuralStop
+        activeTarget := activeDir == 1 ? f_roundTick(realizedEntry + activeTargetDistance) : f_roundTick(realizedEntry - activeTargetDistance)
+        activeEntryBar := realizedEntryBar
+
+        if activeDir == 1
+            longEntryEvent := true
+        else
+            shortEntryEvent := true
+
+        if showTradeLines
+            tradeEntryLine := line.new(realizedEntryBar, activeEntry, bar_index, activeEntry, color = color.white, width = 2)
+            tradeTargetLine := line.new(realizedEntryBar, activeTarget, bar_index, activeTarget, color = color.lime, width = 2, style = line.style_dashed)
+            tradeStopLine := line.new(realizedEntryBar, activeStop, bar_index, activeStop, color = color.red, width = 2, style = line.style_dashed)
+            tradeStructuralStopLine := line.new(realizedEntryBar, activeStructuralStop, bar_index, activeStructuralStop, color = color.new(color.red, 72), width = 1, style = line.style_dotted)
+
+            if showPriceLabels
+                label.new(realizedEntryBar, activeEntry, (activeDir == 1 ? "LONG ENTRY " : "SHORT ENTRY ") + str.tostring(activeEntry, format.mintick), style = label.style_label_left, color = activeDir == 1 ? color.lime : color.red, textcolor = activeDir == 1 ? color.black : color.white, size = size.tiny)
+
+    float directionalMove = activeDir == 1 ? realizedExit - realizedEntry : realizedEntry - realizedExit
+    float tolerance = syminfo.mintick * 1.5
+
+    bool targetExit = activeDir == 1 ? realizedExit >= activeTarget - tolerance : realizedExit <= activeTarget + tolerance
+    bool effectiveStopExit = activeDir == 1 ? realizedExit <= activeStop + tolerance : realizedExit >= activeStop - tolerance
+    bool failureWasEffective = useReactionFailureStop and math.abs(activeStop - activeFailureStop) <= tolerance
+    bool structuralWasEffective = math.abs(activeStop - activeStructuralStop) <= tolerance
+
+    bool runnerLockExit = useAdaptiveRunner and forcedExitReason == "" and not targetExit and not effectiveStopExit and directionalMove > 0
+
+    string stopReason = failureWasEffective ? "REACTION FAILURE" : structuralWasEffective ? "STRUCTURAL STOP" : "STOP"
+    string exitReason = forcedExitReason != "" ? forcedExitReason : targetExit ? "REACTION TARGET" : effectiveStopExit ? stopReason : runnerLockExit ? "PROFIT LOCK / RUNNER" : "OTHER EXIT"
+    string outcome = directionalMove > 0 ? "WIN / EXIT" : directionalMove < 0 ? "LOSS / EXIT" : "EXIT"
+
+    float closedProfit = strategy.closedtrades.profit(closedIndex)
+    if forcedExitReason != ""
+        diagExitOther += 1
+        diagPnlOther += closedProfit
+    else if targetExit
+        diagExitTarget += 1
+        diagPnlTarget += closedProfit
+    else if effectiveStopExit and failureWasEffective
+        diagExitFailure += 1
+        diagPnlFailure += closedProfit
+    else if effectiveStopExit and structuralWasEffective
+        diagExitStructural += 1
+        diagPnlStructural += closedProfit
+    else
+        diagExitOther += 1
+        diagPnlOther += closedProfit
+    bool diagWin = directionalMove > 0
+    sellExitEvent := true
+
+    diagTradesAll += 1
+    diagWinsAll += diagWin ? 1 : 0
+
+    if activeDir == 1
+        diagTradesLong += 1
+        diagWinsLong += diagWin ? 1 : 0
+    else if activeDir == -1
+        diagTradesShort += 1
+        diagWinsShort += diagWin ? 1 : 0
+
+    if activeLevelName == "LEARNED"
+        diagTradesLearned += 1
+        diagWinsLearned += diagWin ? 1 : 0
+    else if activeLevelName == "PDH"
+        diagTradesPDH += 1
+        diagWinsPDH += diagWin ? 1 : 0
+    else if activeLevelName == "PDL"
+        diagTradesPDL += 1
+        diagWinsPDL += diagWin ? 1 : 0
+    else if activeLevelName == "PMH"
+        diagTradesPMH += 1
+        diagWinsPMH += diagWin ? 1 : 0
+    else if activeLevelName == "PML"
+        diagTradesPML += 1
+        diagWinsPML += diagWin ? 1 : 0
+    else if activeLevelName == "ORH"
+        diagTradesORH += 1
+        diagWinsORH += diagWin ? 1 : 0
+    else if activeLevelName == "ORL"
+        diagTradesORL += 1
+        diagWinsORL += diagWin ? 1 : 0
+
+    if activeConfidenceName == "BASE"
+        diagTradesBase += 1
+        diagWinsBase += diagWin ? 1 : 0
+    else if activeConfidenceName == "STRONG"
+        diagTradesStrong += 1
+        diagWinsStrong += diagWin ? 1 : 0
+    else if activeConfidenceName == "A+"
+        diagTradesAPlus += 1
+        diagWinsAPlus += diagWin ? 1 : 0
+
+    if showSignalLabels
+        label.new(
+             bar_index,
+             activeDir == 1 ? high : low,
+             "ALERT: SELL / EXIT QQQ" +
+             "\n" + outcome +
+             "\n" + exitReason +
+             "\nEXIT " + str.tostring(realizedExit, format.mintick) +
+             "\nMOVE " + str.tostring(directionalMove, "#.##") +
+             "\nTYPE " + activeLevelName +
+             "\n" + activeConfidenceName + " " + str.tostring(activeConfidence),
+             style = activeDir == 1 ? label.style_label_down : label.style_label_up,
+             color = directionalMove > 0 ? color.lime : color.red,
+             textcolor = directionalMove > 0 ? color.black : color.white,
+             size = size.small)
+    if showTradeLines
+        if not na(tradeEntryLine)
+            line.set_x2(tradeEntryLine, bar_index)
+        if not na(tradeTargetLine)
+            line.set_x2(tradeTargetLine, bar_index)
+        if not na(tradeStopLine)
+            line.set_x2(tradeStopLine, bar_index)
+        if not na(tradeStructuralStopLine)
+            line.set_x2(tradeStructuralStopLine, bar_index)
+
+        line.new(
+             math.max(0, bar_index - 1),
+             realizedExit,
+             bar_index + 1,
+             realizedExit,
+             color = color.yellow,
+             width = 2,
+             style = line.style_dotted)
+
+        if showPriceLabels
+            label.new(
+                 bar_index,
+                 realizedExit,
+                 "SELL / EXIT " + str.tostring(realizedExit, format.mintick),
+                 style = label.style_label_left,
+                 color = color.yellow,
+                 textcolor = color.black,
+                 size = size.tiny)
+
+    lastClosedTradeCount := strategy.closedtrades
+
+    activeDir := 0
+    activeFilled := false
+    activeSignalClose := na
+    activeConfirmPrice := na
+    activeEntry := na
+    activeStop := na
+    activeStructuralStop := na
+    activeFailureStop := na
+    activeTarget := na
+    activeTargetDistance := na
+    activeTargetTicks := 1
+    activeLockActivationTicks := 1
+    activeLockTrailTicks := 1
+    activeLockActivationDistance := na
+    activeLockTrailDistance := na
+    activePlannedRiskUSD := na
+    activeLevel := na
+    activeATR := na
+    activeConfidence := 0
+    activeConfidenceName := ""
+    activeLevelName := ""
+    activeSignalBar := na
+    activeEntryBar := na
+    forcedExitReason := ""
+
+    armedConfirmLine := na
+    tradeEntryLine := na
+    tradeTargetLine := na
+    tradeStopLine := na
+    tradeStructuralStopLine := na
+
+if activeDir != 0 and not activeFilled and strategy.position_size == 0 and barstate.isconfirmed and not na(activeSignalBar)
+    bool confirmationExpired = bar_index >= activeSignalBar + confirmationWindowBars
+    bool noTradeClosedThisCalc = strategy.closedtrades == lastClosedTradeCount
+
+    if confirmationExpired and noTradeClosedThisCalc
+        if activeDir == 1
+            strategy.cancel("CALL CONFIRM")
+            strategy.cancel("CALL BRACKET")
+        else
+            strategy.cancel("PUT CONFIRM")
+            strategy.cancel("PUT BRACKET")
+
+        diagExpiredAll += 1
+        expiredSetupEvent := true
+
+        if showSignalLabels
+            label.new(
+                 bar_index,
+                 activeDir == 1 ? low : high,
+                 "NO CONFIRM\nSETUP EXPIRED",
+                 style = activeDir == 1 ? label.style_label_up : label.style_label_down,
+                 color = color.gray,
+                 textcolor = color.white,
+                 size = size.tiny)
+
+        if not na(armedConfirmLine)
+            line.set_x2(armedConfirmLine, bar_index)
+            line.set_color(armedConfirmLine, color.new(color.gray, 25))
+
+        activeDir := 0
+        activeFilled := false
+        activeSignalClose := na
+        activeConfirmPrice := na
+        activeEntry := na
+        activeStop := na
+        activeStructuralStop := na
+        activeFailureStop := na
+        activeTarget := na
+        activeTargetDistance := na
+        activeTargetTicks := 1
+        activeLockActivationTicks := 1
+        activeLockTrailTicks := 1
+        activeLockActivationDistance := na
+        activeLockTrailDistance := na
+        activePlannedRiskUSD := na
+        activeLevel := na
+        activeATR := na
+        activeConfidence := 0
+        activeConfidenceName := ""
+        activeLevelName := ""
+        activeSignalBar := na
+        activeEntryBar := na
+        forcedExitReason := ""
+        armedConfirmLine := na
+
+if strategy.closedtrades > lastClosedTradeCount and activeDir == 0
+    lastClosedTradeCount := strategy.closedtrades
+
+if barstate.isconfirmed and validSlot
+    float alpha = 2.0 / (volumeSlotLookback + 1.0)
+    float oldSlotEMA = array.get(slotVolumeEMA, slotIndex)
+    float newSlotEMA = na(oldSlotEMA) ? volume : alpha * volume + (1.0 - alpha) * oldSlotEMA
+    array.set(slotVolumeEMA, slotIndex, newSlotEMA)
+
+plot(
+     showNearestLevels ? selectedSupport : na,
+     "Nearest Reaction Support",
+     color = color.new(color.lime, 15),
+     linewidth = 2,
+     style = plot.style_linebr)
+
+plot(
+     showNearestLevels ? selectedResistance : na,
+     "Nearest Reaction Resistance",
+     color = color.new(color.red, 15),
+     linewidth = 2,
+     style = plot.style_linebr)
+
+plotshape(
+     takeLongSignal,
+     title = "ARM LONG QQQ",
+     style = shape.labelup,
+     location = location.belowbar,
+     color = color.orange,
+     textcolor = color.black,
+     size = size.tiny,
+     text = "ARM\nLONG")
+
+plotshape(
+     takeShortSignal,
+     title = "ARM SHORT QQQ",
+     style = shape.labeldown,
+     location = location.abovebar,
+     color = color.orange,
+     textcolor = color.black,
+     size = size.tiny,
+     text = "ARM\nSHORT")
+
+plotshape(
+     longEntryEvent,
+     title = "LONG QQQ Confirmed Entry",
+     style = shape.labelup,
+     location = location.belowbar,
+     color = color.lime,
+     textcolor = color.black,
+     size = size.tiny,
+     text = "LONG\nENTRY")
+
+plotshape(
+     shortEntryEvent,
+     title = "SHORT QQQ Confirmed Entry",
+     style = shape.labeldown,
+     location = location.abovebar,
+     color = color.red,
+     textcolor = color.white,
+     size = size.tiny,
+     text = "SHORT\nENTRY")
+
+plotshape(
+     sellExitEvent,
+     title = "SELL / EXIT QQQ",
+     style = shape.labeldown,
+     location = location.abovebar,
+     color = color.yellow,
+     textcolor = color.black,
+     size = size.tiny,
+     text = "SELL\nEXIT")
+
+var table diagTable = table.new(
+     position.top_right,
+     6,
+     10,
+     border_width = 1,
+     frame_color = color.new(color.white, 0),
+     border_color = color.new(color.white, 35))
+
+bgcolor(
+     showDiagnosticsTable and tintChartForDashboard ? color.new(color.blue, 92) : na,
+     title = "Diagnostics Dashboard Tint")
+
+if barstate.islast and showDiagnosticsTable
+    float avgTradesPerDay = rthDaysSeen > 0 ? diagTradesAll / rthDaysSeen : na
+    float allWR = f_wrValue(diagWinsAll, diagTradesAll)
+    float avgTargetCents = diagArmedAll > 0 ? diagTargetCentsSum / diagArmedAll : na
+
+    color titleBg = color.new(color.blue, 0)
+    color sectionBg = color.new(color.purple, 20)
+    color normalBg = color.new(color.black, 0)
+
+    table.cell(diagTable, 0, 0, "V1.13 CLEAN RUNNER", text_color = color.white, bgcolor = titleBg)
+    table.cell(diagTable, 1, 0, "TR " + str.tostring(diagTradesAll), text_color = color.white, bgcolor = titleBg)
+    table.cell(diagTable, 2, 0, "WR " + (na(allWR) ? "n/a" : str.tostring(allWR, "#.0") + "%"), text_color = color.white, bgcolor = titleBg)
+    table.cell(diagTable, 3, 0, "ARM " + str.tostring(diagArmedAll), text_color = color.white, bgcolor = titleBg)
+    table.cell(diagTable, 4, 0, "EXP " + str.tostring(diagExpiredAll), text_color = color.white, bgcolor = titleBg)
+    table.cell(diagTable, 5, 0, na(avgTradesPerDay) ? "n/a" : str.tostring(avgTradesPerDay, "#.00") + "/day", text_color = color.white, bgcolor = titleBg)
+
+    table.cell(diagTable, 0, 1, "SIDE", text_color = color.white, bgcolor = sectionBg)
+    table.cell(diagTable, 1, 1, "ALL " + f_wrText(diagWinsAll, diagTradesAll), text_color = color.black, bgcolor = f_wrColor(diagWinsAll, diagTradesAll))
+    table.cell(diagTable, 2, 1, "LONG " + f_wrText(diagWinsLong, diagTradesLong), text_color = color.black, bgcolor = f_wrColor(diagWinsLong, diagTradesLong))
+    table.cell(diagTable, 3, 1, "SHORT " + f_wrText(diagWinsShort, diagTradesShort), text_color = color.black, bgcolor = f_wrColor(diagWinsShort, diagTradesShort))
+    table.cell(diagTable, 4, 1, "BASE " + f_wrText(diagWinsBase, diagTradesBase), text_color = color.black, bgcolor = f_wrColor(diagWinsBase, diagTradesBase))
+    table.cell(diagTable, 5, 1, "STR " + f_wrText(diagWinsStrong, diagTradesStrong), text_color = color.black, bgcolor = f_wrColor(diagWinsStrong, diagTradesStrong))
+
+    table.cell(diagTable, 0, 2, "TARGET PLAN", text_color = color.white, bgcolor = sectionBg)
+    table.cell(diagTable, 1, 2, "ATR " + str.tostring(runnerTargetATR, "#.00"), text_color = color.white, bgcolor = normalBg)
+    table.cell(diagTable, 2, 2, "BPS " + str.tostring(runnerPriceFloorBps, "#.00"), text_color = color.white, bgcolor = normalBg)
+    table.cell(diagTable, 3, 2, "MIN " + str.tostring(runnerMinUSD, format.mintick), text_color = color.white, bgcolor = normalBg)
+    table.cell(diagTable, 4, 2, "MAX " + str.tostring(runnerMaxUSD, format.mintick), text_color = color.white, bgcolor = normalBg)
+    table.cell(diagTable, 5, 2, na(avgTargetCents) ? "AVG n/a" : "AVG " + str.tostring(avgTargetCents, "#.0") + "c", text_color = color.white, bgcolor = normalBg)
+
+    table.cell(diagTable, 0, 3, "LOCK ACTIVE", text_color = color.white, bgcolor = sectionBg)
+    table.cell(diagTable, 1, 3, "LONG " + str.tostring(longLockActivationPlan, format.mintick), text_color = color.white, bgcolor = normalBg)
+    table.cell(diagTable, 2, 3, "TRAIL " + str.tostring(longLockTrailPlan, format.mintick), text_color = color.white, bgcolor = normalBg)
+    table.cell(diagTable, 3, 3, "SHORT " + str.tostring(shortLockActivationPlan, format.mintick), text_color = color.white, bgcolor = normalBg)
+    table.cell(diagTable, 4, 3, "TRAIL " + str.tostring(shortLockTrailPlan, format.mintick), text_color = color.white, bgcolor = normalBg)
+    table.cell(diagTable, 5, 3, "BANK ~" + str.tostring(profitLockBankUSD, format.mintick), text_color = color.white, bgcolor = normalBg)
+
+    table.cell(diagTable, 0, 4, "EXIT COUNT", text_color = color.white, bgcolor = sectionBg)
+    table.cell(diagTable, 1, 4, "TP " + str.tostring(diagExitTarget), text_color = color.white, bgcolor = normalBg)
+    table.cell(diagTable, 2, 4, "FAIL " + str.tostring(diagExitFailure), text_color = color.white, bgcolor = normalBg)
+    table.cell(diagTable, 3, 4, "STRUCT " + str.tostring(diagExitStructural), text_color = color.white, bgcolor = normalBg)
+    table.cell(diagTable, 4, 4, "OTHER " + str.tostring(diagExitOther), text_color = color.white, bgcolor = normalBg)
+    table.cell(diagTable, 5, 4, "1c FAIL", text_color = color.white, bgcolor = normalBg)
+
+    table.cell(diagTable, 0, 5, "EXIT PNL", text_color = color.white, bgcolor = sectionBg)
+    table.cell(diagTable, 1, 5, "TP " + str.tostring(diagPnlTarget, "#.##"), text_color = color.white, bgcolor = normalBg)
+    table.cell(diagTable, 2, 5, "FAIL " + str.tostring(diagPnlFailure, "#.##"), text_color = color.white, bgcolor = normalBg)
+    table.cell(diagTable, 3, 5, "STRUCT " + str.tostring(diagPnlStructural, "#.##"), text_color = color.white, bgcolor = normalBg)
+    table.cell(diagTable, 4, 5, "OTHER " + str.tostring(diagPnlOther, "#.##"), text_color = color.white, bgcolor = normalBg)
+    table.cell(diagTable, 5, 5, "CHECK TESTER", text_color = color.white, bgcolor = normalBg)
+
+    table.cell(diagTable, 0, 6, "QUALITY TARGET", text_color = color.white, bgcolor = sectionBg)
+    table.cell(diagTable, 1, 6, "BASE x" + str.tostring(baseTargetMult, "#.00"), text_color = color.white, bgcolor = normalBg)
+    table.cell(diagTable, 2, 6, "STR x" + str.tostring(strongTargetMult, "#.00"), text_color = color.white, bgcolor = normalBg)
+    table.cell(diagTable, 3, 6, "A+ x" + str.tostring(aPlusTargetMult, "#.00"), text_color = color.white, bgcolor = normalBg)
+    table.cell(diagTable, 4, 6, "NO ENTRY CHANGE", text_color = color.white, bgcolor = normalBg)
+    table.cell(diagTable, 5, 6, "RUNNER ONLY", text_color = color.white, bgcolor = normalBg)
+
+    table.cell(diagTable, 0, 7, "FILTERED", text_color = color.white, bgcolor = sectionBg)
+    table.cell(diagTable, 1, 7, "ORH12 " + str.tostring(diagFilterORHBase12), text_color = color.white, bgcolor = normalBg)
+    table.cell(diagTable, 2, 7, "PML14 " + str.tostring(diagFilterPMLBase14), text_color = color.white, bgcolor = normalBg)
+    table.cell(diagTable, 3, 7, "LRN13 " + str.tostring(diagFilterLearnedStrong13), text_color = color.white, bgcolor = normalBg)
+    table.cell(diagTable, 4, 7, "PDL11 " + str.tostring(diagFilterPDLBase11), text_color = color.white, bgcolor = normalBg)
+    table.cell(diagTable, 5, 7, "TOTAL " + str.tostring(diagFilteredAll), text_color = color.white, bgcolor = normalBg)
+
+    table.cell(diagTable, 0, 8, "BENCHMARK", text_color = color.white, bgcolor = sectionBg)
+    table.cell(diagTable, 1, 8, "V1.10A", text_color = color.white, bgcolor = normalBg)
+    table.cell(diagTable, 2, 8, "WR 75.77", text_color = color.white, bgcolor = normalBg)
+    table.cell(diagTable, 3, 8, "PF 2.066", text_color = color.white, bgcolor = normalBg)
+    table.cell(diagTable, 4, 8, "PnL 7519", text_color = color.white, bgcolor = normalBg)
+    table.cell(diagTable, 5, 8, "DD 110", text_color = color.white, bgcolor = normalBg)
+
+    table.cell(diagTable, 0, 9, "TEST FIRST", text_color = color.white, bgcolor = sectionBg)
+    table.cell(diagTable, 1, 9, "365 DAYS", text_color = color.white, bgcolor = normalBg)
+    table.cell(diagTable, 2, 9, "PF", text_color = color.white, bgcolor = normalBg)
+    table.cell(diagTable, 3, 9, "WR", text_color = color.white, bgcolor = normalBg)
+    table.cell(diagTable, 4, 9, "AVG WIN", text_color = color.white, bgcolor = normalBg)
+    table.cell(diagTable, 5, 9, "EQUITY", text_color = color.white, bgcolor = normalBg)
+
+plot(showConfidenceData ? longConfidence : na, "Long Confidence", display = display.data_window)
+plot(showConfidenceData ? shortConfidence : na, "Short Confidence", display = display.data_window)
+plot(showConfidenceData ? supportTouches : na, "Support Touches", display = display.data_window)
+plot(showConfidenceData ? resistanceTouches : na, "Resistance Touches", display = display.data_window)
+plot(showConfidenceData ? supportAge : na, "Support Age Bars", display = display.data_window)
+plot(showConfidenceData ? resistanceAge : na, "Resistance Age Bars", display = display.data_window)
+plot(showConfidenceData ? supportQuality : na, "Support Formation Departure ATR", display = display.data_window)
+plot(showConfidenceData ? resistanceQuality : na, "Resistance Formation Departure ATR", display = display.data_window)
+plot(showConfidenceData ? supportConfluence : na, "Support Confluence", display = display.data_window)
+plot(showConfidenceData ? resistanceConfluence : na, "Resistance Confluence", display = display.data_window)
+plot(showConfidenceData ? slotRVOL : na, "Same-Time Relative Volume", display = display.data_window)
+plot(showConfidenceData ? approachMoveATR : na, "Approach Move ATR", display = display.data_window)
+plot(showConfidenceData ? longRejectATR : na, "Long Rejection Displacement ATR", display = display.data_window)
+plot(showConfidenceData ? shortRejectATR : na, "Short Rejection Displacement ATR", display = display.data_window)

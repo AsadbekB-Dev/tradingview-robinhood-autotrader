@@ -1,0 +1,14 @@
+# Never commit secrets or local state
+.env
+*.env
+secrets*.json
+*token*
+*webhook*.txt
+state/
+*.db
+*.zip
+*.log
+__pycache__/
+.venv/
+.DS_Store
+Thumbs.db

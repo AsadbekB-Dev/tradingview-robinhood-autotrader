@@ -1,0 +1,134 @@
+server:
+  host: 127.0.0.1
+  port: 8787
+  webhook_secret: change-me
+  enforce_tradingview_ip_allowlist: true
+  webhook_max_body_bytes: 8192
+  allow_legacy_execution_callbacks: false
+execution:
+  require_fresh_signal_seconds: 25
+  auto_submit_live_orders: true
+  max_quote_age_seconds: 3.0
+  require_quote_timestamp: true
+  budget_mode: fixed_dollars
+  max_trade_budget_dollars: 200.0
+  respect_live_buying_power: true
+  buying_power_reserve_dollars: 0.0
+  max_open_positions: 1
+  max_total_open_positions: 2
+  max_total_committed_dollars: 400.0
+  require_fresh_origin_signal_seconds: 25
+  require_origin_timestamp: true
+  max_origin_clock_skew_seconds: 10.0
+selector:
+  min_dte: 0
+  max_dte: 0
+  preferred_dte: 0
+  expected_hold_minutes: 10
+  hard_min_open_interest: 0
+  hard_min_volume: 0
+  hard_max_spread_pct: 0.45
+  hard_min_abs_delta: 0.03
+  max_contracts_per_trade: 10
+  target_delta: 0.45
+  delta_soft_width: 0.45
+  spread_soft_ceiling: 0.25
+  weight_position_target: 4.5
+  weight_reward_risk: 2.0
+  weight_liquidity: 0.55
+  weight_spread: 1.5
+  weight_delta_fit: 0.65
+  weight_budget_utilization: 0.2
+  weight_extreme_delta_penalty: 0.9
+  weight_stop_loss: 0.4
+  min_premium: 0.01
+  max_premium: 10.0
+  target_premium: 1.5
+  min_open_interest: 0
+  min_volume: 0
+  max_spread_pct: 0.45
+  min_delta: 0.03
+  max_delta: 0.99
+  weight_projected_roi: 3.0
+  weight_price_fit: 0.2
+persistent_worker:
+  state_dir: state
+  window_strikes_each_side: 4
+  adaptive_window_max_each_side: 8
+  account_refresh_seconds: 5.0
+  console_status_seconds: 10.0
+  order_status_poll_seconds: 0.35
+  signal_dedupe_seconds: 20.0
+  signal_queue_maxsize: 256
+  jobs_per_loop: 1
+  cancel_retry_seconds: 1.0
+  broker_position_reconcile_seconds: 5.0
+  entry_intent_ttl_seconds: 12.0
+  live_entry_order_timeout_seconds: 12.0
+  live_exit_order_timeout_seconds: 2.5
+  max_exit_reprice_attempts: 6
+  deferred_exit_retry_seconds: 0.5
+  max_underlying_quote_age_seconds: 3.0
+  underlying_stop_watchdog_seconds: 1.0
+  position_killswitch_minutes: 25.0
+  entry_cutoff_minutes_before_sellout: 20.0
+  fallback_entry_cutoff_et: '15:15'
+  force_exit_minutes_before_sellout: 5.0
+  fallback_force_exit_et: '15:40'
+  after_hours_idle_et: '16:00'
+  exit_process_end_of_day: false
+  auto_shutdown_when_flat_et: '16:00'
+  auto_roll_expiration: false
+  shared_quote_cache_seconds: 0.6
+  require_underlying_quote_timestamp: true
+robinhood_mcp:
+  url: https://agent.robinhood.com/mcp/trading
+  client_name: Asads AUTOMATION
+  startup_timeout_seconds: 300
+  time_in_force: gfd
+journal:
+  enabled: true
+  directory: state/trade_journal
+tunnel:
+  mode: quick
+  public_url: ''
+  token_file: state/cloudflare_tunnel_token.txt
+ui:
+  open_tradingview_on_url_change: true
+  backup_on_shutdown: true
+  backup_directory: '%USERPROFILE%\Documents\AsadsBotBackups'
+strategies:
+  MAIN:
+    enabled: true
+    execution:
+      require_fresh_signal_seconds: 25
+      max_quote_age_seconds: 3.0
+      max_trade_budget_dollars: 200.0
+      max_open_positions: 1
+      require_fresh_origin_signal_seconds: 25
+      require_origin_timestamp: true
+    selector:
+      expected_hold_minutes: 10
+    persistent_worker:
+      live_entry_order_timeout_seconds: 12.0
+      position_killswitch_minutes: 25.0
+      require_underlying_quote_timestamp: true
+  SCALPER:
+    enabled: true
+    execution:
+      require_fresh_signal_seconds: 12
+      max_quote_age_seconds: 2.5
+      max_trade_budget_dollars: 200.0
+      max_open_positions: 1
+      require_fresh_origin_signal_seconds: 12
+      require_origin_timestamp: true
+    selector:
+      expected_hold_minutes: 2
+    persistent_worker:
+      live_entry_order_timeout_seconds: 4.0
+      position_killswitch_minutes: 10.0
+      require_underlying_quote_timestamp: true
+learning:
+  enabled: true
+  shadow_only: true
+  news_enabled: false
