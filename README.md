@@ -68,4 +68,4 @@ pytest tests/
 
 ---
 
-*© Asad Kurbonov. Shared for portfolio purposes. Please ask before reusing.*
+*© Asadbek Bakhodirov. Shared for portfolio purposes. Please ask before reusing.*
